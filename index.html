@@ -16,6 +16,9 @@
 <script>
   window.SUPABASE_URL = "https://ynmikutonikslgtdlbbz.supabase.co";
   window.SUPABASE_ANON_KEY = "sb_publishable_DdHUhWSmdYBnyZCQ9mDExQ_VTZKUhdi";
+  // URL de la Apps Script Web App (buscarRecibo.gs) que busca comprobantes en Drive.
+  // Reemplace con la URL /exec que obtiene al implementar el script como Aplicación Web.
+  window.RECIBO_SEARCH_URL = "PASTE_APPS_SCRIPT_WEB_APP_URL_HERE";
 </script>
 <!-- ============================================================ -->
 
@@ -103,9 +106,14 @@ table.pay-table tr:last-child td{border-bottom:none;}
 table.pay-table input, table.pay-table select{width:100%;padding:6px 7px;border-radius:7px;border:1px solid var(--line);font-family:var(--sans);font-size:12px;background:var(--surface);}
 table.pay-table input[type=number]{max-width:80px;}
 .table-wrap{overflow-x:auto;}
+.link-cell{min-width:160px;}
 .link-cell a{color:var(--primary);text-decoration:none;font-weight:600;}
 .link-cell a:hover{text-decoration:underline;}
 .link-empty{color:var(--muted);font-style:italic;}
+.comp-admin{display:flex;flex-direction:column;gap:5px;}
+.comp-links{min-height:14px;}
+.comp-edit-row{display:flex;gap:5px;align-items:center;}
+.comp-edit-row .f-comprobante{flex:1;}
 .row-actions{display:flex;gap:4px;}
 
 .summary-mini{display:grid;grid-template-columns:1.4fr repeat(4,0.9fr);gap:6px;font-size:12.5px;align-items:center;}
@@ -512,6 +520,57 @@ function renderMonth(content, y, m){
   if (addBtn) addBtn.addEventListener("click", ()=> openAddRowModal(y,m));
 }
 
+function splitLinks(comprobante){ return (comprobante||"").split("|").map(s=>s.trim()).filter(Boolean); }
+
+function comprobanteHtml(r){
+  const links = splitLinks(r.comprobante);
+  const viewerLinks = links.length
+    ? links.map((url,i)=> `<a href="${url}" target="_blank" rel="noopener">${links.length>1 ? "Recibo "+(i+1) : "Ver comprobante"}</a>`).join(" · ")
+    : `<span class="link-empty">Sin enlace</span>`;
+  if (!state.isAdmin) return viewerLinks;
+  return `
+    <div class="comp-admin">
+      <div class="comp-links small">${viewerLinks}</div>
+      <div class="comp-edit-row">
+        <input type="text" class="f-comprobante" placeholder="Pegar enlace aquí (o usar Buscar)" value="${r.comprobante||''}" />
+        <button class="btn btn-outline sm icon f-buscar" title="Buscar en Drive" data-id="${r.id}">🔍</button>
+      </div>
+    </div>`;
+}
+
+async function buscarComprobante(r, opts){
+  opts = opts || {};
+  if (!window.RECIBO_SEARCH_URL || window.RECIBO_SEARCH_URL.includes("PASTE_")){
+    showToast("Falta configurar la URL de búsqueda de recibos (Apps Script).");
+    return;
+  }
+  const c = caregiverById(r.cuidadoraId);
+  if (!c) return;
+  const cell = document.getElementById("comp-cell-"+r.id);
+  if (cell) cell.innerHTML = `<span class="muted small">Buscando…</span>`;
+  try {
+    const mesNombre = capitalize(MONTH_NAMES[r.month-1]);
+    const url = window.RECIBO_SEARCH_URL
+      + "?mes=" + encodeURIComponent(mesNombre)
+      + "&cuidadora=" + encodeURIComponent(c.name)
+      + "&semana=" + encodeURIComponent(r.semana);
+    const res = await fetch(url);
+    const data = await res.json();
+    if (data.matches && data.matches.length){
+      r.comprobante = data.matches.map(m=>m.url).join(" | ");
+      await persistRegistros();
+      showToast(data.matches.length>1 ? (data.matches.length+" recibos vinculados.") : "Recibo vinculado.");
+    } else {
+      showToast("No se encontró recibo en Drive todavía. Puede pegar el enlace manualmente.");
+    }
+  } catch(err){
+    console.error("buscarComprobante error", err);
+    showToast("Error al buscar el recibo. Verifique la URL de Apps Script.");
+  }
+  const tr = document.querySelector(`tr[data-id="${r.id}"]`);
+  if (tr){ tr.outerHTML = rowHtml(r); wireRow(r); }
+}
+
 function rowHtml(r){
   const c = caregiverById(r.cuidadoraId);
   const badgeClass = r.estado==="Pagado" ? "badge-pagado" : "badge-pend";
@@ -525,9 +584,7 @@ function rowHtml(r){
     <td>${state.isAdmin
         ? `<select class="f-estado"><option ${r.estado==='Pendiente'?'selected':''}>Pendiente</option><option ${r.estado==='Pagado'?'selected':''}>Pagado</option></select>`
         : `<span class="badge ${badgeClass}">${r.estado}</span>`}</td>
-    <td class="link-cell">${state.isAdmin
-        ? `<input type="url" class="f-comprobante" placeholder="Pegar enlace aquí" value="${r.comprobante||''}" />`
-        : (r.comprobante ? `<a href="${r.comprobante}" target="_blank" rel="noopener">Ver comprobante</a>` : `<span class="link-empty">Sin enlace</span>`)}</td>
+    <td class="link-cell" id="comp-cell-${r.id}">${comprobanteHtml(r)}</td>
     ${state.isAdmin ? `<td><button class="btn btn-danger icon sm f-delete" title="Eliminar fila">✕</button></td>` : ""}
   </tr>`;
 }
@@ -540,9 +597,16 @@ function wireRow(r){
   const metodoEl = tr.querySelector(".f-metodo");
   if (metodoEl) metodoEl.addEventListener("change", ()=>{ r.metodo = metodoEl.value; persistRegistros(); });
   const estadoEl = tr.querySelector(".f-estado");
-  if (estadoEl) estadoEl.addEventListener("change", ()=>{ r.estado = estadoEl.value; persistRegistros(); render(); });
-  const compEl = tr.querySelector(".f-comprobante");
-  if (compEl) compEl.addEventListener("change", ()=>{ r.comprobante = compEl.value.trim(); persistRegistros(); });
+  if (estadoEl) estadoEl.addEventListener("change", ()=>{
+    const wasPagado = r.estado === "Pagado";
+    r.estado = estadoEl.value;
+    persistRegistros();
+    render();
+    if (r.estado==="Pagado" && !wasPagado && !r.comprobante){
+      buscarComprobante(r);
+    }
+  });
+  wireComprobanteCell(r);
   const delEl = tr.querySelector(".f-delete");
   if (delEl) delEl.addEventListener("click", ()=>{
     if (!confirm("¿Eliminar esta fila de pago?")) return;
@@ -551,6 +615,20 @@ function wireRow(r){
   });
 }
 function renderCurrentMonthTotalsOnly(){ render(); }
+
+function wireComprobanteCell(r){
+  const cell = document.getElementById("comp-cell-"+r.id);
+  if (!cell) return;
+  const compEl = cell.querySelector(".f-comprobante");
+  if (compEl) compEl.addEventListener("change", ()=>{
+    r.comprobante = compEl.value.trim();
+    persistRegistros();
+    cell.innerHTML = comprobanteHtml(r);
+    wireComprobanteCell(r);
+  });
+  const buscarEl = cell.querySelector(".f-buscar");
+  if (buscarEl) buscarEl.addEventListener("click", ()=> buscarComprobante(r));
+}
 
 /* ---------------- Add month ---------------- */
 function addNextMonth(){
