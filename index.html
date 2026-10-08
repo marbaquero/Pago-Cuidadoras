@@ -181,6 +181,13 @@ async function kvGet(key, fallback){
   if (error){ console.error("kvGet error", key, error); return fallback; }
   return data ? data.value : fallback;
 }
+// Lectura estricta: distingue "error al leer" de "no existe todavía". Así un fallo de red
+// nunca se confunde con un proyecto vacío (que antes recreaba todos los pagos como pendientes).
+async function kvGetStrict(key){
+  const { data, error } = await supa.from("kv_store").select("value").eq("key", key).maybeSingle();
+  if (error){ console.error("kvGet error", key, error); return { ok:false }; }
+  return { ok:true, value: data ? data.value : null };
+}
 async function kvSet(key, value){
   const { error } = await supa.from("kv_store").upsert({ key, value, updated_at: new Date().toISOString() });
   if (error) console.error("kvSet error", key, error);
@@ -189,15 +196,34 @@ async function kvSet(key, value){
 /* ---------------- Constants ---------------- */
 const MONTH_NAMES = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
 const DEFAULT_CAREGIVERS = [
-  { id:"aracely", name:"Aracely", turno:"Diurno (lun–vie)", weeklyRate:130, color:"#2E86AB", scheduleType:"weekday" },
+  { id:"aracely", name:"Aracely", turno:"Diurno (lun–vie)", weeklyRate:200, color:"#2E86AB", scheduleType:"weekday" },
   { id:"ibeth",   name:"Ibeth",   turno:"Nocturno (lun–vie)", weeklyRate:125, color:"#8B5CF6", scheduleType:"weekday" },
-  { id:"carmita", name:"Carmita", turno:"Fines de semana + relevos", weeklyRate:70,  color:"#6F9A72", scheduleType:"weekend" }
+  { id:"carmita", name:"Carmita", turno:"Fines de semana + relevos", weeklyRate:100, color:"#6F9A72", scheduleType:"weekend" }
 ];
 function scheduleTypeOf(c){
   if (c && c.scheduleType) return c.scheduleType;
   return (c && c.id === "carmita") ? "weekend" : "weekday";
 }
 const METODOS = ["Transferencia","Efectivo","Cheque","Otro"];
+
+// Feriados nacionales (YYYY-MM-DD). Cada feriado dentro de un período suma un día extra
+// (recargo del 100%): tarifa/5 para lun–vie y tarifa/2 para sáb–dom. Agregue aquí los siguientes.
+const FERIADOS = ["2026-10-09"];
+function holidayExtra(c, startD, endD){
+  if (!c) return 0;
+  const s = toISO(startD), e = toISO(endD);
+  const n = FERIADOS.filter(f => f >= s && f <= e).length;
+  if (!n) return 0;
+  const rate = Number(c.weeklyRate)||0;
+  return n * (scheduleTypeOf(c)==="weekend" ? rate/2 : rate/5);
+}
+// Período que le corresponde a una cuidadora a partir de la fecha de inicio:
+// lun–vie para turnos de semana (fecha = lunes), sáb–dom para fines de semana (fecha = sábado).
+function periodInfo(c, dateStr){
+  const start = parseISO(dateStr);
+  const end = addDays(start, scheduleTypeOf(c)==="weekend" ? 1 : 4);
+  return { start, end, periodo: periodoLabelRange(start,end), monto: (Number(c.weeklyRate)||0) + holidayExtra(c,start,end) };
+}
 
 /* ---------------- State ---------------- */
 const state = {
@@ -258,24 +284,27 @@ function periodoLabelRange(startD, endD){
   return startD.getDate()+" "+sMon.slice(0,3)+" – "+endD.getDate()+" "+eMon.slice(0,3);
 }
 
-// Called when admin edits a row's Fecha. Derives the Monday of that pay week
-// (from either a weekday-caregiver date or a weekend-caregiver Saturday date),
-// then updates this row AND every sibling row in the same month tab that shares
-// the same original Semana number for other caregivers — each caregiver
-// following their own scheduleType (Mon–Fri for weekday, Sáb–Dom for weekend).
+// Called when admin edits a row's Fecha. Sincroniza la semana de pago: busca las demás filas
+// PENDIENTES que pertenecen a la misma semana (mismo lunes, según su fecha actual: lun–vie usa el
+// lunes, sáb–dom usa el sábado menos 5 días) y las mueve a la nueva semana, cada cuidadora según su
+// propio turno. Las filas ya pagadas nunca se tocan, y una fila nueva sin hermanas solo cambia ella.
 function syncWeekFromDateEdit(editedRow, newDateStr){
-  const editedCaregiver = caregiverById(editedRow.cuidadoraId);
-  const editedType = scheduleTypeOf(editedCaregiver);
+  if (!newDateStr) return;
+  const mondayOf = (row)=>{
+    const t = scheduleTypeOf(caregiverById(row.cuidadoraId));
+    const d = parseISO(row.fecha);
+    return t === "weekend" ? addDays(d, -5) : d;
+  };
+  const editedType = scheduleTypeOf(caregiverById(editedRow.cuidadoraId));
   const newDate = parseISO(newDateStr);
-  // Derive the Monday of this pay week regardless of which row was edited.
   const monday = editedType === "weekend" ? addDays(newDate, -5) : newDate;
+  const oldMondayISO = toISO(mondayOf(editedRow));
 
-  const originalSemana = editedRow.semana;
-  const siblings = state.registros.filter(x =>
-    x.year === editedRow.year && x.month === editedRow.month && x.semana === originalSemana
-  );
-  // Always include the edited row itself, even if its semana was blank/null.
-  if (!siblings.includes(editedRow)) siblings.push(editedRow);
+  const siblings = state.registros.filter(x=>{
+    if (x === editedRow) return true;
+    if (x.estado === "Pagado") return false;
+    return toISO(mondayOf(x)) === oldMondayISO;
+  });
 
   siblings.forEach(row=>{
     const c = caregiverById(row.cuidadoraId);
@@ -290,11 +319,22 @@ function syncWeekFromDateEdit(editedRow, newDateStr){
       row.fecha = toISO(monday);
       row.periodo = periodoLabelRange(monday, fri);
     }
+    // Monto (con feriados) para filas pendientes
+    if (row.estado !== "Pagado") row.monto = periodInfo(c, row.fecha).monto;
+  });
+
+  // Semana = posición de la fila (según su fecha) entre las filas de la misma cuidadora en esa pestaña.
+  // Solo se renumeran las filas pendientes; las pagadas conservan su número (los recibos se buscan por "Semana N").
+  siblings.forEach(row=>{
+    if (row.estado === "Pagado") return;
+    const before = state.registros.filter(x=> x!==row && x.cuidadoraId===row.cuidadoraId &&
+      x.year===row.year && x.month===row.month && x.fecha < row.fecha).length;
+    row.semana = before + 1;
   });
 
   persistRegistros();
   render();
-  showToast("Semana actualizada para las tres cuidadoras.");
+  showToast(siblings.length>1 ? ("Semana actualizada ("+siblings.length+" filas pendientes).") : "Fecha actualizada.");
 }
 // Finds the Monday to start the NEXT weekly period from, based on the latest
 // Monday–Friday-style row already in state (its fecha + 4 days = Friday), or
@@ -321,16 +361,19 @@ function generateWeekdayPeriods(startMonday, count, caregivers){
   for (let i=0; i<count; i++){
     const friday = addDays(monday, 4);
     const y = friday.getFullYear(), m = friday.getMonth()+1;
-    const periodo = periodoLabelRange(monday, friday);
     caregivers.forEach(c=>{
+      const weekend = scheduleTypeOf(c) === "weekend";
+      // Turnos de semana: lun–vie. Fin de semana: el sábado y domingo que siguen a esa semana.
+      const start = weekend ? addDays(monday, 5) : monday;
+      const info = periodInfo(c, toISO(start));
       rows.push({
-        id: "r_wk_"+toISO(monday)+"_"+c.id+"_"+Math.random().toString(36).slice(2,7),
+        id: "r_wk_"+toISO(start)+"_"+c.id+"_"+Math.random().toString(36).slice(2,7),
         year:y, month:m, semana:null,
-        periodStyle:"weekday",
+        periodStyle: weekend ? "weekend" : "weekday",
         cuidadoraId:c.id,
-        fecha: toISO(monday),
-        periodo: periodo,
-        monto: c.weeklyRate,
+        fecha: toISO(start),
+        periodo: info.periodo,
+        monto: info.monto,
         metodo: "Transferencia",
         estado: "Pendiente",
         comprobante: ""
@@ -340,11 +383,40 @@ function generateWeekdayPeriods(startMonday, count, caregivers){
   }
   return rows;
 }
+// Siguiente número de semana para una cuidadora dentro de un mes (para que el enlace
+// automático de recibos, que busca por "Semana N", funcione en las filas nuevas).
+function nextSemanaFor(y, m, cid, extraRows){
+  let max = 0;
+  state.registros.concat(extraRows||[]).forEach(r=>{
+    if (r.year===y && r.month===m && r.cuidadoraId===cid){
+      const n = parseInt(r.semana,10);
+      if (!isNaN(n) && n>max) max = n;
+    }
+  });
+  return max + 1;
+}
 
 function generateMonthRegistros(y,m,caregivers){
   const weeks = genWeeks(y,m);
   const rows = [];
   caregivers.forEach(c=>{
+    if (scheduleTypeOf(c) === "weekend"){
+      // Fines de semana: un pago por cada sábado del mes (sáb–dom).
+      let n = 1;
+      for (let d=1; d<=daysInMonth(y,m); d++){
+        const dt = new Date(y, m-1, d);
+        if (dt.getDay() !== 6) continue;
+        const info = periodInfo(c, toISO(dt));
+        rows.push({
+          id: "r_"+y+"_"+m+"_"+c.id+"_"+n+"_"+Math.random().toString(36).slice(2,7),
+          year:y, month:m, semana:n, periodStyle:"weekend",
+          cuidadoraId:c.id, fecha:toISO(dt), periodo:info.periodo, monto:info.monto,
+          metodo:"Transferencia", estado:"Pendiente", comprobante:""
+        });
+        n++;
+      }
+      return;
+    }
     weeks.forEach(w=>{
       rows.push({
         id: "r_"+y+"_"+m+"_"+c.id+"_"+w.semana+"_"+Math.random().toString(36).slice(2,7),
@@ -364,16 +436,39 @@ function generateMonthRegistros(y,m,caregivers){
 
 /* ---------------- Load / bootstrap ---------------- */
 async function loadAll(){
-  const [cfg, regs, settings] = await Promise.all([
-    kvGet("pagos_config", null),
-    kvGet("pagos_registros", null),
-    kvGet("settings", null)
+  const [cfgR, regsR, setR] = await Promise.all([
+    kvGetStrict("pagos_config"),
+    kvGetStrict("pagos_registros"),
+    kvGetStrict("settings")
   ]);
+  if (!cfgR.ok || !regsR.ok || !setR.ok){
+    // No se pudo leer: NO se crea ni se guarda nada. Se ofrece reintentar.
+    document.getElementById("app").innerHTML = `
+      <div class="config-warning"><div class="config-box">
+        <h2>No se pudieron cargar los datos</h2>
+        <p>Hubo un problema de conexión con la base de datos. No se modificó nada.</p>
+        <button class="btn btn-primary" id="retry-load">Reintentar</button>
+      </div></div>`;
+    document.getElementById("retry-load").addEventListener("click", ()=>{ loadAll(); });
+    return;
+  }
+  const cfg = cfgR.value, regs = regsR.value, settings = setR.value;
   state.config = cfg || { caregivers: DEFAULT_CAREGIVERS };
   if (!cfg) await kvSet("pagos_config", state.config);
 
   if (!regs){
-    // Seed September–December 2026
+    if (cfg){
+      // Hay configuración pero faltan los registros: algo raro. No se vuelve a crear automáticamente.
+      document.getElementById("app").innerHTML = `
+        <div class="config-warning"><div class="config-box">
+          <h2>No se encontraron los pagos</h2>
+          <p>La configuración existe pero no los registros. Por seguridad no se recrean solos; avise para restaurarlos.</p>
+          <button class="btn btn-primary" id="retry-load">Reintentar</button>
+        </div></div>`;
+      document.getElementById("retry-load").addEventListener("click", ()=>{ loadAll(); });
+      return;
+    }
+    // Proyecto nuevo: se crean septiembre–diciembre 2026
     let rows = [];
     [9,10,11,12].forEach(m => { rows = rows.concat(generateMonthRegistros(2026, m, state.config.caregivers)); });
     state.registros = rows;
@@ -507,6 +602,10 @@ function render(){
         ${state.isAdmin ? `<button class="add-month-btn" id="add-month-btn"><span>＋</span> Agregar semana (lun–vie)</button>` : ""}
       </div>
       <div class="sidebar-foot">
+        ${state.isAdmin ? `<button class="admin-toggle" id="edit-rates-btn"><span class="dot" style="background:var(--amber)"></span>Editar tarifas</button>` : ""}
+        ${state.isAdmin && looksReseeded() ? `<button class="admin-toggle" id="restore-btn"><span class="dot" style="background:var(--brick)"></span>Restaurar sept. y oct.</button>` : ""}
+        ${state.isAdmin && !looksReseeded() && !octFixDone() ? `<button class="admin-toggle" id="fix-oct-btn"><span class="dot" style="background:var(--amber)"></span>Corregir octubre 2026</button>` : ""}
+        ${state.isAdmin && missingReceipts().length ? `<button class="admin-toggle" id="find-receipts-btn"><span class="dot" style="background:var(--amber)"></span>Buscar recibos faltantes (${missingReceipts().length})</button>` : ""}
         <button class="admin-toggle ${state.isAdmin?'on':''}" id="admin-toggle"><span class="dot"></span>${state.isAdmin ? "Administrador activo" : "Modo administrador"}</button>
       </div>
     </div>
@@ -521,6 +620,14 @@ function render(){
   document.getElementById("admin-toggle").addEventListener("click", toggleAdmin);
   const addBtn = document.getElementById("add-month-btn");
   if (addBtn) addBtn.addEventListener("click", addNextMonth);
+  const ratesBtn = document.getElementById("edit-rates-btn");
+  if (ratesBtn) ratesBtn.addEventListener("click", openEditRatesModal);
+  const fixOctBtn = document.getElementById("fix-oct-btn");
+  if (fixOctBtn) fixOctBtn.addEventListener("click", runOctFix);
+  const restoreBtn = document.getElementById("restore-btn");
+  if (restoreBtn) restoreBtn.addEventListener("click", restoreSepOct2026);
+  const findRecBtn = document.getElementById("find-receipts-btn");
+  if (findRecBtn) findRecBtn.addEventListener("click", buscarRecibosFaltantes);
 
   const content = document.getElementById("content");
   if (state.view === "resumen") renderResumenAnual(content);
@@ -584,7 +691,7 @@ function renderResumenAnual(content){
 }
 
 function renderMonth(content, y, m){
-  const rows = rowsForMonth(y,m).sort((a,b)=> a.cuidadoraId===b.cuidadoraId ? a.semana-b.semana : a.cuidadoraId.localeCompare(b.cuidadoraId));
+  const rows = rowsForMonth(y,m).sort((a,b)=> a.cuidadoraId===b.cuidadoraId ? String(a.fecha).localeCompare(String(b.fecha)) : a.cuidadoraId.localeCompare(b.cuidadoraId));
   const t = totals(rows);
   const byCaregiver = summaryByCaregiver(rows);
 
@@ -847,11 +954,169 @@ function wireComprobanteCell(r){
   });
 }
 
+/* ---------------- Edit rates ---------------- */
+function openEditRatesModal(){
+  requireAdmin(()=>{
+    const backdrop = document.createElement("div");
+    backdrop.className = "modal-backdrop";
+    backdrop.innerHTML = `
+      <div class="modal">
+        <h3>Editar tarifas</h3>
+        <p class="muted small">Aracely e Ibeth: monto por semana (lun–vie). Carmita: monto por fin de semana (sáb+dom).</p>
+        <div class="stack" style="margin-top:14px;">
+          ${state.config.caregivers.map(c=>`
+            <label style="display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--muted);font-weight:600;">
+              <span><span class="care-dot" style="background:${c.color}"></span>${c.name} <span style="font-weight:400;">(${c.turno})</span></span>
+              <input type="number" step="0.01" class="rate-input" data-id="${c.id}" value="${c.weeklyRate}" style="padding:9px 10px;border-radius:8px;border:1px solid var(--line);font-family:var(--sans);font-size:13.5px;color:var(--ink);" />
+            </label>`).join("")}
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;margin-top:16px;font-size:12px;color:var(--muted);">
+          <input type="checkbox" id="rates-apply-pending" style="width:auto;" />
+          Aplicar también a los pagos <b>pendientes</b> ya creados (no cambia los ya marcados como Pagado)
+        </label>
+        <div class="modal-actions">
+          <button class="btn btn-ghost" id="rates-cancel">Cancelar</button>
+          <button class="btn btn-primary" id="rates-save">Guardar tarifas</button>
+        </div>
+      </div>`;
+    document.body.appendChild(backdrop);
+    backdrop.querySelector("#rates-cancel").addEventListener("click", ()=>backdrop.remove());
+    backdrop.querySelector("#rates-save").addEventListener("click", async ()=>{
+      const applyPending = backdrop.querySelector("#rates-apply-pending").checked;
+      const changes = {};
+      backdrop.querySelectorAll(".rate-input").forEach(inp=>{
+        const c = caregiverById(inp.dataset.id);
+        const val = parseFloat(inp.value)||0;
+        if (c && val !== c.weeklyRate){ changes[c.id] = val; c.weeklyRate = val; }
+      });
+      await persistConfig();
+      if (applyPending){
+        state.registros.forEach(r=>{
+          if (r.estado !== "Pagado" && changes[r.cuidadoraId] !== undefined) r.monto = changes[r.cuidadoraId];
+        });
+        await persistRegistros();
+      }
+      backdrop.remove();
+      render();
+      const names = Object.keys(changes).map(id=>caregiverById(id).name);
+      showToast(names.length ? ("Tarifa actualizada: "+names.join(", ")+".") : "Sin cambios.");
+    });
+  });
+}
+
+/* ---------------- One-time fix: October 2026 ---------------- */
+// Corrige las filas PENDIENTES de octubre 2026 (las pagadas no se tocan): fechas de lunes/sábado,
+// períodos, la fila que faltaba de Carmita (31 oct–1 nov), el feriado del 9 de octubre y las tarifas
+// acordadas. Se puede ejecutar una sola vez (queda marcado en la configuración).
+function octFixDone(){ return !!(state.config.migraciones && state.config.migraciones.oct2026); }
+function applyOct2026Fix(){
+  const Y = 2026, M = 10;
+  const NEW_RATES = { aracely:200, ibeth:125, carmita:100 };
+  state.config.caregivers.forEach(c=>{ if (NEW_RATES[c.id] !== undefined) c.weeklyRate = NEW_RATES[c.id]; });
+
+  const monday1 = parseISO("2026-10-05");   // semana 1 lun–vie
+  const sat1 = parseISO("2026-10-10");      // primer sábado todavía pendiente de Carmita (semana 2)
+  state.config.caregivers.forEach(c=>{
+    const weekend = scheduleTypeOf(c) === "weekend";
+    const semanas = weekend ? [2,3,4,5] : [1,2,3,4];
+    semanas.forEach((n,i)=>{
+      const start = addDays(weekend ? sat1 : monday1, 7*i);
+      let row = state.registros.find(r=>r.year===Y && r.month===M && r.cuidadoraId===c.id && parseInt(r.semana,10)===n);
+      if (row && row.estado === "Pagado") return;
+      if (!row){
+        row = {
+          id: "r_fix_"+toISO(start)+"_"+c.id+"_"+Math.random().toString(36).slice(2,7),
+          year:Y, month:M, semana:n, cuidadoraId:c.id,
+          metodo:"Transferencia", estado:"Pendiente", comprobante:""
+        };
+        state.registros.push(row);
+      }
+      const info = periodInfo(c, toISO(start));
+      row.periodStyle = weekend ? "weekend" : "weekday";
+      row.fecha = toISO(start);
+      row.periodo = info.periodo;
+      row.monto = info.monto;
+    });
+  });
+  state.config.migraciones = Object.assign({}, state.config.migraciones, { oct2026:true });
+}
+function runOctFix(){
+  requireAdmin(async ()=>{
+    const ok = confirm("Esto corrige las filas PENDIENTES de octubre 2026 (no toca las pagadas):\n\n"
+      + "• Tarifas: Aracely $200/sem, Ibeth $125/sem, Carmita $100/fin de semana\n"
+      + "• Fechas y períodos: lun 5, 12, 19 y 26 (Aracely e Ibeth); sáb 10, 17, 24 y 31 (Carmita)\n"
+      + "• Agrega la fila de Carmita 31 oct–1 nov\n"
+      + "• Feriado del 9 oct: Aracely $240, Ibeth $150\n\n¿Continuar?");
+    if (!ok) return;
+    applyOct2026Fix();
+    await persistConfig();
+    await persistRegistros();
+    state.view = monthKey(2026,10);
+    render();
+    showToast("Octubre 2026 corregido.");
+  });
+}
+
+/* ---------------- Restore Sep/Oct 2026 + bulk receipt search ---------------- */
+// Septiembre ya pagado + octubre, tal como estaban (montos y fechas de los pagos hechos). Solo se ofrece
+// cuando septiembre aparece sin ningún pago marcado como Pagado (señal de que los datos se reiniciaron).
+function looksReseeded(){
+  const sept = rowsForMonth(2026,9);
+  return sept.length === 0 || !sept.some(r=>r.estado === "Pagado");
+}
+function restoreSepOct2026(){
+  requireAdmin(async ()=>{
+    const ok = confirm("Septiembre aparece sin pagos marcados. Esto restaura SEPTIEMBRE 2026 (todo Pagado, con los montos reales) "
+      + "y rehace OCTUBRE 2026 (Carmita 3–4 oct pagada; el resto pendiente con las tarifas y fechas correctas).\n\n"
+      + "Los recibos se vuelven a vincular después con \"Buscar recibos faltantes\".\n\n¿Continuar?");
+    if (!ok) return;
+    const WK = [["2026-08-31","31 ago – 4 sep"],["2026-09-07","7–11 septiembre"],["2026-09-14","14–18 septiembre"],["2026-09-21","21–25 septiembre"],["2026-09-28","28 sep – 2 oct"]];
+    const ARACELY = [130,130,130,200,200];
+    const CARMITA = [["2026-09-05","5–6 septiembre",70],["2026-09-12","12–13 septiembre",80],["2026-09-19","19–20 septiembre",100],["2026-09-26","26–27 septiembre",70]];
+    const mk = (cid, sem, fecha, periodo, monto, year, month)=>({
+      id:"r_rest_"+cid+"_"+fecha+"_"+Math.random().toString(36).slice(2,6),
+      year, month, semana:sem, cuidadoraId:cid, fecha, periodo, monto,
+      metodo:"Transferencia", estado:"Pagado", comprobante:""
+    });
+    state.registros = state.registros.filter(r=>!(r.year===2026 && (r.month===9 || r.month===10)));
+    WK.forEach(([f,per],i)=>{
+      state.registros.push(mk("aracely", i+1, f, per, ARACELY[i], 2026, 9));
+      state.registros.push(mk("ibeth",   i+1, f, per, 125,        2026, 9));
+    });
+    CARMITA.forEach(([f,per,monto],i)=> state.registros.push(mk("carmita", i+1, f, per, monto, 2026, 9)));
+    const c1 = mk("carmita", 1, "2026-10-03", "3–4 octubre", 100, 2026, 10);
+    c1.periodStyle = "weekend";
+    state.registros.push(c1);
+    applyOct2026Fix();   // crea el resto de octubre (pendiente), fija tarifas y marca la corrección como hecha
+    await persistConfig();
+    await persistRegistros();
+    state.view = monthKey(2026,9);
+    render();
+    showToast("Septiembre y octubre restaurados.");
+  });
+}
+function missingReceipts(){ return state.registros.filter(r=>r.estado==="Pagado" && !r.comprobante && r.semana); }
+function buscarRecibosFaltantes(){
+  requireAdmin(async ()=>{
+    const list = missingReceipts();
+    if (!list.length) return showToast("No hay recibos por buscar.");
+    if (!confirm("Buscar en Drive el recibo de "+list.length+" pagos marcados como Pagado que no tienen enlace. Puede tardar un minuto. ¿Continuar?")) return;
+    let found = 0;
+    for (const r of list){
+      await buscarComprobante(r);
+      if (r.comprobante) found++;
+    }
+    render();
+    showToast("Listo: "+found+" de "+list.length+" recibos vinculados.");
+  });
+}
+
 /* ---------------- Add month ---------------- */
 function addNextMonth(){
   requireAdmin(async ()=>{
     const startMonday = nextWeeklyStartMonday();
     const newRows = generateWeekdayPeriods(startMonday, 1, state.config.caregivers);
+    newRows.forEach((r,i)=>{ r.semana = nextSemanaFor(r.year, r.month, r.cuidadoraId, newRows.slice(0,i)); });
     state.registros = state.registros.concat(newRows);
     await persistRegistros();
     const y = newRows[0].year, m = newRows[0].month;
@@ -862,6 +1127,26 @@ function addNextMonth(){
 }
 
 /* ---------------- Add single row (manual payment) ---------------- */
+// Primera semana (lun–vie) o fin de semana (sáb–dom) de este mes que la cuidadora todavía no tiene.
+function suggestStartDate(c, y, m){
+  const weekend = scheduleTypeOf(c) === "weekend";
+  const mine = state.registros.filter(r=>r.cuidadoraId===c.id);
+  const existing = new Set(mine.filter(r=>r.year===y && r.month===m).map(r=>String(r.periodo).trim()));
+  const usedDates = new Set(mine.map(r=>r.fecha));   // también evita semanas que viven en otro mes
+  const cands = [];
+  const from = new Date(y, m-1, 1-6), to = new Date(y, m-1, daysInMonth(y,m));
+  for (let dt = from; dt <= to; dt = addDays(dt, 1)){
+    if (weekend){
+      if (dt.getDay()===6 && dt.getMonth()===m-1) cands.push(new Date(dt));
+    } else if (dt.getDay()===1){
+      const fri = addDays(dt, 4);
+      if (fri.getFullYear()===y && fri.getMonth()===m-1) cands.push(new Date(dt));
+    }
+  }
+  const free = cands.find(dt => !usedDates.has(toISO(dt)) && !existing.has(periodInfo(c, toISO(dt)).periodo));
+  return toISO(free || cands[cands.length-1] || new Date(y, m-1, 1));
+}
+
 function openAddRowModal(y,m){
   requireAdmin(()=>{
     const backdrop = document.createElement("div");
@@ -869,6 +1154,7 @@ function openAddRowModal(y,m){
     backdrop.innerHTML = `
       <div class="modal">
         <h3>Agregar pago — ${monthLabel(y,m)}</h3>
+        <p class="muted small">Solo se agrega esta fila; no cambia las demás. La fecha es el lunes (turnos lun–vie) o el sábado (fines de semana), y el período se calcula solo.</p>
         <div class="form-grid">
           <label>Cuidadora
             <select id="nf-cuidadora">${state.config.caregivers.map(c=>`<option value="${c.id}">${c.name}</option>`).join("")}</select>
@@ -880,7 +1166,7 @@ function openAddRowModal(y,m){
             <input type="number" id="nf-semana" value="1" min="1" />
           </label>
           <label>Período
-            <input type="text" id="nf-periodo" placeholder="ej. 1–7 septiembre" />
+            <input type="text" id="nf-periodo" placeholder="ej. 17–18 octubre" />
           </label>
           <label>Monto
             <input type="number" step="0.01" id="nf-monto" value="0" />
@@ -896,19 +1182,43 @@ function openAddRowModal(y,m){
       </div>`;
     document.body.appendChild(backdrop);
     const cuidSel = backdrop.querySelector("#nf-cuidadora");
+    const fechaInp = backdrop.querySelector("#nf-fecha");
+    const semanaInp = backdrop.querySelector("#nf-semana");
+    const periodoInp = backdrop.querySelector("#nf-periodo");
     const montoInp = backdrop.querySelector("#nf-monto");
-    cuidSel.addEventListener("change", ()=>{ const c=caregiverById(cuidSel.value); if(c) montoInp.value=c.weeklyRate; });
-    montoInp.value = caregiverById(cuidSel.value).weeklyRate;
+
+    // Con la fecha elegida se calculan período y monto (incluye el recargo de feriados).
+    function fillFromDate(){
+      const c = caregiverById(cuidSel.value);
+      if (!c || !fechaInp.value) return;
+      const info = periodInfo(c, fechaInp.value);
+      periodoInp.value = info.periodo;
+      montoInp.value = info.monto;
+    }
+    // Al elegir cuidadora se sugiere la primera semana/fin de semana que le falta en este mes.
+    function fillForCaregiver(){
+      const c = caregiverById(cuidSel.value);
+      if (!c) return;
+      fechaInp.value = suggestStartDate(c, y, m);
+      semanaInp.value = nextSemanaFor(y, m, c.id);
+      fillFromDate();
+    }
+    cuidSel.addEventListener("change", fillForCaregiver);
+    fechaInp.addEventListener("change", fillFromDate);
+    fillForCaregiver();
 
     backdrop.querySelector("#nf-cancel").addEventListener("click", ()=>backdrop.remove());
     backdrop.querySelector("#nf-save").addEventListener("click", async ()=>{
+      const c = caregiverById(cuidSel.value);
+      if (!fechaInp.value) return showToast("Elija una fecha.");
       const row = {
         id: "r_manual_"+Date.now()+"_"+Math.random().toString(36).slice(2,7),
         year:y, month:m,
-        semana: parseInt(backdrop.querySelector("#nf-semana").value)||1,
+        semana: parseInt(semanaInp.value)||1,
+        periodStyle: scheduleTypeOf(c)==="weekend" ? "weekend" : "weekday",
         cuidadoraId: cuidSel.value,
-        fecha: backdrop.querySelector("#nf-fecha").value,
-        periodo: backdrop.querySelector("#nf-periodo").value || "—",
+        fecha: fechaInp.value,
+        periodo: periodoInp.value || "—",
         monto: parseFloat(montoInp.value)||0,
         metodo: backdrop.querySelector("#nf-metodo").value,
         estado: "Pendiente",
