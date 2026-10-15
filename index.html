@@ -607,12 +607,14 @@ function render(){
         ${state.isAdmin ? `<button class="admin-toggle" id="edit-rates-btn"><span class="dot" style="background:var(--amber)"></span>Editar tarifas</button>` : ""}
         ${state.isAdmin && looksReseeded() ? `<button class="admin-toggle" id="restore-btn"><span class="dot" style="background:var(--brick)"></span>Restaurar sept. y oct.</button>` : ""}
         ${state.isAdmin && !looksReseeded() && !octFixDone() ? `<button class="admin-toggle" id="fix-oct-btn"><span class="dot" style="background:var(--amber)"></span>Corregir octubre 2026</button>` : ""}
+        ${state.isAdmin && !looksReseeded() && !staffOct15Done() ? `<button class="admin-toggle" id="staff-oct15-btn"><span class="dot" style="background:var(--amber)"></span>Actualizar equipo (Genesis)</button>` : ""}
         ${state.isAdmin && missingReceipts().length ? `<button class="admin-toggle" id="find-receipts-btn"><span class="dot" style="background:var(--amber)"></span>Buscar recibos faltantes (${missingReceipts().length})</button>` : ""}
         <button class="admin-toggle ${state.isAdmin?'on':''}" id="admin-toggle"><span class="dot"></span>${state.isAdmin ? "Administrador activo" : "Modo administrador"}</button>
       </div>
     </div>
     <div class="main">
       <div class="sync-banner"><span class="sync-dot"></span><span id="sync-pill">Sincronizado</span> · datos compartidos en tiempo real</div>
+      ${dueReminders().map(r=>`<div class="sync-banner" style="background:#FEF3C7;color:#92400E;">⏰ ${r.texto}${state.isAdmin ? ` <button class="btn btn-ghost sm" data-rem-done="${r.id}">Hecho</button>` : ""}</div>`).join("")}
       <div class="content stack-lg" id="content"></div>
     </div>`;
 
@@ -628,6 +630,14 @@ function render(){
   if (ratesBtn) ratesBtn.addEventListener("click", openEditRatesModal);
   const fixOctBtn = document.getElementById("fix-oct-btn");
   if (fixOctBtn) fixOctBtn.addEventListener("click", runOctFix);
+  const staffBtn = document.getElementById("staff-oct15-btn");
+  if (staffBtn) staffBtn.addEventListener("click", runStaffOct15);
+  document.querySelectorAll("[data-rem-done]").forEach(b=>{
+    b.addEventListener("click", async ()=>{
+      const rem = (state.config.recordatorios||[]).find(x=>x.id===b.dataset.remDone);
+      if (rem){ rem.hecho = true; await persistConfig(); render(); }
+    });
+  });
   const restoreBtn = document.getElementById("restore-btn");
   if (restoreBtn) restoreBtn.addEventListener("click", restoreSepOct2026);
   const findRecBtn = document.getElementById("find-receipts-btn");
@@ -1158,6 +1168,95 @@ function runOctFix(){
     render();
     showToast("Octubre 2026 corregido.");
   });
+}
+
+/* ---------------- One-time change: equipo (15 oct 2026) ---------------- */
+// • Ibeth pasa a $150/sem desde el lunes 19 oct (solo filas PENDIENTES desde esa fecha).
+// • Carmita queda INACTIVA: se conserva todo su historial pagado; se quitan solo sus filas pendientes desde el 10 oct.
+// • Entra Genesis (fines de semana, $70 = $35 sáb + $35 dom) con su día de inducción (vie 16 oct, $35).
+// • Recordatorio el 15 dic (día 60 de Genesis): revisar si sube a $100 por fin de semana.
+// Se ejecuta una sola vez (queda marcado en la configuración).
+function staffOct15Done(){ return !!(state.config.migraciones && state.config.migraciones.staffOct15); }
+function applyStaffOct15(){
+  const cg = state.config.caregivers;
+  const rid = (tag)=> "r_"+tag+"_"+Math.random().toString(36).slice(2,7);
+
+  // 1) Ibeth
+  const ibeth = cg.find(c=>c.id==="ibeth");
+  if (ibeth){
+    ibeth.weeklyRate = 150;
+    state.registros.forEach(r=>{
+      if (r.cuidadoraId==="ibeth" && r.estado!=="Pagado" && r.fecha >= "2026-10-19") r.monto = periodInfo(ibeth, r.fecha).monto;
+    });
+  }
+
+  // 2) Carmita inactiva (el historial pagado no se toca)
+  const carmita = cg.find(c=>c.id==="carmita");
+  const removed = [];
+  if (carmita){
+    carmita.inactive = true;
+    carmita.inactivaDesde = "2026-10-10";
+    state.registros = state.registros.filter(r=>{
+      const drop = r.cuidadoraId==="carmita" && r.estado!=="Pagado" && r.fecha >= "2026-10-10";
+      if (drop) removed.push(r);
+      return !drop;
+    });
+  }
+
+  // 3) Genesis
+  let genesis = cg.find(c=>c.id==="genesis");
+  if (!genesis){
+    genesis = { id:"genesis", name:"Genesis", turno:"Fines de semana (sáb–dom)", weeklyRate:70, color:"#D97706", scheduleType:"weekend" };
+    cg.push(genesis);
+  }
+  delete genesis.inactive;
+  const has = (f)=> state.registros.some(x=>x.cuidadoraId==="genesis" && x.fecha===f);
+  if (!has("2026-10-16")){
+    state.registros.push({
+      id:rid("gen_ind"), year:2026, month:10, semana:1, periodStyle:"weekend", cuidadoraId:"genesis",
+      fecha:"2026-10-16", periodo:"16 oct (inducción)", monto:35,
+      metodo:"Transferencia", estado:"Pendiente", comprobante:""
+    });
+  }
+  // Fines de semana: mismo horizonte que tenían las filas pendientes de Carmita (desde el sáb 17 oct).
+  let sats = removed.filter(r=>r.fecha >= "2026-10-17").map(r=>({ year:r.year, month:r.month, fecha:r.fecha }));
+  if (!sats.length) sats = ["2026-10-17","2026-10-24","2026-10-31"].map(f=>({ year:2026, month:10, fecha:f }));
+  sats.sort((a,b)=> String(a.fecha).localeCompare(String(b.fecha)));
+  sats.forEach(s=>{
+    if (has(s.fecha)) return;
+    const info = periodInfo(genesis, s.fecha);
+    state.registros.push({
+      id:rid("gen"), year:s.year, month:s.month, semana:nextSemanaFor(s.year, s.month, "genesis"),
+      periodStyle:"weekend", cuidadoraId:"genesis", fecha:s.fecha, periodo:info.periodo, monto:info.monto,
+      metodo:"Transferencia", estado:"Pendiente", comprobante:""
+    });
+  });
+
+  state.config.recordatorios = (state.config.recordatorios||[]).filter(x=>x.id!=="genesis60").concat([
+    { id:"genesis60", fecha:"2026-12-15", texto:"Genesis cumple 60 días: revisar si su pago sube a $100 por fin de semana (si el desempeño es satisfactorio)." }
+  ]);
+  state.config.migraciones = Object.assign({}, state.config.migraciones, { staffOct15:true });
+}
+function runStaffOct15(){
+  requireAdmin(async ()=>{
+    const ok = confirm("Esto actualiza el equipo (no toca nada ya marcado como Pagado):\n\n"
+      + "• Ibeth: $150/semana desde el lunes 19 oct (solo filas pendientes)\n"
+      + "• Carmita: pasa a INACTIVA (se conserva su historial). Se quitan sus filas pendientes desde el 10 oct\n"
+      + "• Genesis (nueva): $70 por fin de semana ($35 sáb + $35 dom), desde el sáb 17 oct, más su día de inducción del vie 16 oct ($35)\n"
+      + "• Recordatorio el 15 dic para revisar el aumento de Genesis a $100\n\n¿Continuar?");
+    if (!ok) return;
+    applyStaffOct15();
+    await persistConfig();
+    await persistRegistros();
+    state.view = monthKey(2026,10);
+    render();
+    showToast("Equipo actualizado: Genesis agregada y Carmita inactiva.");
+  });
+}
+// Recordatorios con fecha: aparecen una semana antes y se pueden marcar como hechos (solo administrador).
+function dueReminders(){
+  const limit = toISO(addDays(new Date(), 7));
+  return (state.config.recordatorios||[]).filter(r=> !r.hecho && r.fecha <= limit);
 }
 
 /* ---------------- Restore Sep/Oct 2026 + bulk receipt search ---------------- */
