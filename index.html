@@ -608,6 +608,7 @@ function render(){
         ${state.isAdmin && looksReseeded() ? `<button class="admin-toggle" id="restore-btn"><span class="dot" style="background:var(--brick)"></span>Restaurar sept. y oct.</button>` : ""}
         ${state.isAdmin && !looksReseeded() && !octFixDone() ? `<button class="admin-toggle" id="fix-oct-btn"><span class="dot" style="background:var(--amber)"></span>Corregir octubre 2026</button>` : ""}
         ${state.isAdmin && !looksReseeded() && !staffOct15Done() ? `<button class="admin-toggle" id="staff-oct15-btn"><span class="dot" style="background:var(--amber)"></span>Actualizar equipo (Genesis)</button>` : ""}
+        ${state.isAdmin && weekdayFixes().length ? `<button class="admin-toggle" id="fix-weekdays-btn"><span class="dot" style="background:var(--amber)"></span>Ajustar períodos lun–vie (${weekdayFixes().length})</button>` : ""}
         ${state.isAdmin && missingReceipts().length ? `<button class="admin-toggle" id="find-receipts-btn"><span class="dot" style="background:var(--amber)"></span>Buscar recibos faltantes (${missingReceipts().length})</button>` : ""}
         <button class="admin-toggle ${state.isAdmin?'on':''}" id="admin-toggle"><span class="dot"></span>${state.isAdmin ? "Administrador activo" : "Modo administrador"}</button>
       </div>
@@ -630,6 +631,8 @@ function render(){
   if (ratesBtn) ratesBtn.addEventListener("click", openEditRatesModal);
   const fixOctBtn = document.getElementById("fix-oct-btn");
   if (fixOctBtn) fixOctBtn.addEventListener("click", runOctFix);
+  const fixWdBtn = document.getElementById("fix-weekdays-btn");
+  if (fixWdBtn) fixWdBtn.addEventListener("click", runWeekdayFix);
   const staffBtn = document.getElementById("staff-oct15-btn");
   if (staffBtn) staffBtn.addEventListener("click", runStaffOct15);
   document.querySelectorAll("[data-rem-done]").forEach(b=>{
@@ -1257,6 +1260,58 @@ function runStaffOct15(){
 function dueReminders(){
   const limit = toISO(addDays(new Date(), 7));
   return (state.config.recordatorios||[]).filter(r=> !r.hecho && r.fecha <= limit);
+}
+
+/* ---------------- Ajuste de períodos lun–vie (Aracely e Ibeth) ---------------- */
+// Los turnos de semana se pagan de lunes a viernes. Algunas filas PENDIENTES quedaron con bloques de
+// 7 días (p. ej. "8–14 noviembre") o con la fecha en otro día. Este ajuste lleva cada una a su
+// lunes y al período lun–vie ("9–13 noviembre"). No toca filas Pagado, no cambia montos ni semanas, y
+// no toca relevos de fin de semana (períodos cortos de 1–2 días o que empiezan en sábado).
+function parseDayMonth(txt, defMonth){
+  const m = String(txt||"").match(/^\s*(\d{1,2})(?:\s+([A-Za-zÁÉÍÓÚáéíóúñÑ]+))?/);
+  if (!m) return null;
+  let mon = defMonth;
+  if (m[2]){
+    const i = MONTH_NAMES.findIndex(n => n.slice(0,3) === m[2].toLowerCase().slice(0,3));
+    if (i >= 0) mon = i+1;
+  }
+  return { day: parseInt(m[1],10), month: mon };
+}
+function weekdayFixFor(r){
+  const c = caregiverById(r.cuidadoraId);
+  if (!c || scheduleTypeOf(c) !== "weekday" || r.estado === "Pagado") return null;
+  const parts = String(r.periodo||"").split(/[–-]/);
+  if (parts.length < 2) return null;
+  const a = parseDayMonth(parts[0], r.month);
+  if (!a) return null;
+  const b = parseDayMonth(parts[1], a.month);
+  if (!b) return null;
+  let sy = r.year; if (a.month > r.month) sy -= 1;
+  const start = new Date(sy, a.month-1, a.day);
+  let ey = sy; if (b.month < a.month) ey += 1;
+  const end = new Date(ey, b.month-1, b.day);
+  const span = Math.round((end - start) / 86400000);
+  if (span < 4 || start.getDay() === 6) return null;   // relevo de fin de semana u otro período corto
+  const monday = nextOrSameMonday(start);
+  const fecha = toISO(monday), periodo = periodoLabelRange(monday, addDays(monday, 4));
+  if (r.fecha === fecha && r.periodo === periodo) return null;
+  return { fecha, periodo };
+}
+function weekdayFixes(){
+  return state.registros.map(r=>({ r, fix: weekdayFixFor(r) })).filter(x=>x.fix);
+}
+function runWeekdayFix(){
+  requireAdmin(async ()=>{
+    const list = weekdayFixes();
+    if (!list.length) return showToast("No hay períodos por ajustar.");
+    const sample = list.slice(0,6).map(x=>"• "+caregiverById(x.r.cuidadoraId).name+": "+x.r.periodo+" → "+x.fix.periodo).join("\n");
+    if (!confirm("Esto ajusta "+list.length+" filas PENDIENTES de Aracely e Ibeth al período lunes–viernes (no toca las pagadas ni los montos):\n\n"
+      + sample + (list.length>6 ? "\n• …" : "") + "\n\n¿Continuar?")) return;
+    list.forEach(x=>{ x.r.fecha = x.fix.fecha; x.r.periodo = x.fix.periodo; });
+    await persistRegistros();
+    render();
+    showToast("Períodos ajustados ("+list.length+" filas).");
+  });
 }
 
 /* ---------------- Restore Sep/Oct 2026 + bulk receipt search ---------------- */
