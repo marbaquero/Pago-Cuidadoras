@@ -564,6 +564,7 @@ function toggleAdmin(){
 
 /* ---------------- Derived calcs ---------------- */
 function caregiverById(id){ return state.config.caregivers.find(c=>c.id===id); }
+function activeCaregivers(){ return state.config.caregivers.filter(c=>!c.inactive); }
 function rowsForMonth(y,m){ return state.registros.filter(r=>r.year===y && r.month===m); }
 function totals(rows){
   let total=0, pagado=0;
@@ -571,7 +572,7 @@ function totals(rows){
   return { total, pagado, pendiente: total-pagado, pct: total>0 ? Math.round((pagado/total)*100) : 0 };
 }
 function summaryByCaregiver(rows){
-  return state.config.caregivers.map(c=>{
+  return state.config.caregivers.filter(c=>!c.inactive || rows.some(r=>r.cuidadoraId===c.id)).map(c=>{
     const crows = rows.filter(r=>r.cuidadoraId===c.id);
     const t = totals(crows);
     return { caregiver:c, ...t };
@@ -602,6 +603,7 @@ function render(){
         ${state.isAdmin ? `<button class="add-month-btn" id="add-month-btn"><span>＋</span> Agregar semana (lun–vie)</button>` : ""}
       </div>
       <div class="sidebar-foot">
+        ${state.isAdmin ? `<button class="admin-toggle" id="add-care-btn"><span class="dot" style="background:var(--amber)"></span>Agregar cuidadora</button>` : ""}
         ${state.isAdmin ? `<button class="admin-toggle" id="edit-rates-btn"><span class="dot" style="background:var(--amber)"></span>Editar tarifas</button>` : ""}
         ${state.isAdmin && looksReseeded() ? `<button class="admin-toggle" id="restore-btn"><span class="dot" style="background:var(--brick)"></span>Restaurar sept. y oct.</button>` : ""}
         ${state.isAdmin && !looksReseeded() && !octFixDone() ? `<button class="admin-toggle" id="fix-oct-btn"><span class="dot" style="background:var(--amber)"></span>Corregir octubre 2026</button>` : ""}
@@ -620,6 +622,8 @@ function render(){
   document.getElementById("admin-toggle").addEventListener("click", toggleAdmin);
   const addBtn = document.getElementById("add-month-btn");
   if (addBtn) addBtn.addEventListener("click", addNextMonth);
+  const addCareBtn = document.getElementById("add-care-btn");
+  if (addCareBtn) addCareBtn.addEventListener("click", openAddCaregiverModal);
   const ratesBtn = document.getElementById("edit-rates-btn");
   if (ratesBtn) ratesBtn.addEventListener("click", openEditRatesModal);
   const fixOctBtn = document.getElementById("fix-oct-btn");
@@ -954,6 +958,97 @@ function wireComprobanteCell(r){
   });
 }
 
+/* ---------------- Add caregiver ---------------- */
+const CARE_COLORS = ["#E07A5F","#F2A541","#3D9970","#D1495B","#00798C","#9C6ADE"];
+function openAddCaregiverModal(){
+  requireAdmin(()=>{
+    const backdrop = document.createElement("div");
+    backdrop.className = "modal-backdrop";
+    const inp = "padding:9px 10px;border-radius:8px;border:1px solid var(--line);font-family:var(--sans);font-size:13.5px;color:var(--ink);";
+    backdrop.innerHTML = `
+      <div class="modal">
+        <h3>Agregar cuidadora</h3>
+        <div class="stack" style="margin-top:14px;">
+          <label style="display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--muted);font-weight:600;">Nombre
+            <input type="text" id="ac-name" placeholder="Genesis" style="${inp}" /></label>
+          <label style="display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--muted);font-weight:600;">Turno
+            <select id="ac-turno" style="${inp}">
+              <option value="weekend">Fines de semana (sáb 7am – lun 7am)</option>
+              <option value="weekday-day">Diurno (lun–vie)</option>
+              <option value="weekday-night">Nocturno (lun–vie)</option>
+            </select></label>
+          <label style="display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--muted);font-weight:600;">Pago (por semana lun–vie, o por fin de semana)
+            <input type="number" step="0.01" id="ac-rate" placeholder="70" style="${inp}" /></label>
+          <label style="display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--muted);font-weight:600;">Primer sábado (o lunes) de trabajo
+            <input type="date" id="ac-start" style="${inp}" /></label>
+          <div style="display:flex;gap:10px;">
+            <label style="display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--muted);font-weight:600;flex:1;">Sube a (opcional)
+              <input type="number" step="0.01" id="ac-rate2" placeholder="100" style="${inp}" /></label>
+            <label style="display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--muted);font-weight:600;flex:1;">Desde la fecha
+              <input type="date" id="ac-from2" style="${inp}" /></label>
+          </div>
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);">
+            <input type="checkbox" id="ac-fill" checked style="width:auto;" /> Crear las filas de pago desde esa fecha hasta el 31 de enero de 2027
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-ghost" id="ac-cancel">Cancelar</button>
+          <button class="btn btn-primary" id="ac-save">Agregar</button>
+        </div>
+      </div>`;
+    document.body.appendChild(backdrop);
+    const $ = (q)=>backdrop.querySelector(q);
+    $("#ac-cancel").addEventListener("click", ()=>backdrop.remove());
+    $("#ac-save").addEventListener("click", async ()=>{
+      const name = $("#ac-name").value.trim();
+      const rate = parseFloat($("#ac-rate").value);
+      const start = $("#ac-start").value;
+      const rate2 = parseFloat($("#ac-rate2").value)||0, from2 = $("#ac-from2").value;
+      if (!name || !(rate>0)){ showToast("Escriba el nombre y el pago."); return; }
+      let id = name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^a-z0-9]+/g,"");
+      if (!id) id = "cuid"+Date.now();
+      if (state.config.caregivers.some(c=>c.id===id)){ showToast("Ya existe una cuidadora con ese nombre."); return; }
+      const t = $("#ac-turno").value;
+      const c = {
+        id, name, weeklyRate: rate,
+        turno: t==="weekend" ? "Fines de semana" : t==="weekday-day" ? "Diurno (lun–vie)" : "Nocturno (lun–vie)",
+        color: CARE_COLORS[state.config.caregivers.length % CARE_COLORS.length],
+        scheduleType: t==="weekend" ? "weekend" : "weekday"
+      };
+      state.config.caregivers.push(c);
+      await persistConfig();
+      let n = 0;
+      if ($("#ac-fill").checked && start){
+        const end = parseISO("2027-01-31");
+        const weekend = c.scheduleType==="weekend";
+        let d = parseISO(start);
+        const rows = [];
+        while (d <= end){
+          // Se archiva en la pestaña del viernes de esa semana (para fines de semana: el viernes anterior)
+          const friday = weekend ? addDays(d,-1) : addDays(d,4);
+          const info = periodInfo(c, toISO(d));
+          if (rate2>0 && from2 && toISO(d) >= from2) info.monto = rate2;
+          rows.push({
+            id:"r_"+c.id+"_"+toISO(d)+"_"+Math.random().toString(36).slice(2,7),
+            year:friday.getFullYear(), month:friday.getMonth()+1, semana:null,
+            periodStyle: weekend?"weekend":"weekday", cuidadoraId:c.id,
+            fecha:toISO(d), periodo:info.periodo, monto:info.monto,
+            metodo:"Transferencia", estado:"Pendiente", comprobante:""
+          });
+          d = addDays(d,7);
+        }
+        rows.forEach((r,i)=>{ r.semana = nextSemanaFor(r.year, r.month, r.cuidadoraId, rows.slice(0,i)); });
+        state.registros = state.registros.concat(rows);
+        n = rows.length;
+        await persistRegistros();
+      }
+      backdrop.remove();
+      render();
+      showToast(name+" agregada"+(n?(" con "+n+" filas de pago."):"."));
+    });
+  });
+}
+
 /* ---------------- Edit rates ---------------- */
 function openEditRatesModal(){
   requireAdmin(()=>{
@@ -968,6 +1063,7 @@ function openEditRatesModal(){
             <label style="display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--muted);font-weight:600;">
               <span><span class="care-dot" style="background:${c.color}"></span>${c.name} <span style="font-weight:400;">(${c.turno})</span></span>
               <input type="number" step="0.01" class="rate-input" data-id="${c.id}" value="${c.weeklyRate}" style="padding:9px 10px;border-radius:8px;border:1px solid var(--line);font-family:var(--sans);font-size:13.5px;color:var(--ink);" />
+              <span style="display:flex;align-items:center;gap:6px;font-weight:400;"><input type="checkbox" class="inactive-input" data-id="${c.id}" ${c.inactive?"checked":""} style="width:auto;" /> Inactiva (ya no trabaja; no se le crean filas nuevas)</span>
             </label>`).join("")}
         </div>
         <label style="display:flex;align-items:center;gap:8px;margin-top:16px;font-size:12px;color:var(--muted);">
@@ -989,10 +1085,17 @@ function openEditRatesModal(){
         const val = parseFloat(inp.value)||0;
         if (c && val !== c.weeklyRate){ changes[c.id] = val; c.weeklyRate = val; }
       });
+      backdrop.querySelectorAll(".inactive-input").forEach(inp=>{
+        const c = caregiverById(inp.dataset.id);
+        if (c) c.inactive = inp.checked;
+      });
       await persistConfig();
       if (applyPending){
         state.registros.forEach(r=>{
-          if (r.estado !== "Pagado" && changes[r.cuidadoraId] !== undefined) r.monto = changes[r.cuidadoraId];
+          if (r.estado !== "Pagado" && changes[r.cuidadoraId] !== undefined){
+            const c = caregiverById(r.cuidadoraId);
+            r.monto = periodInfo(c, r.fecha).monto;   // tarifa nueva + recargo de feriados
+          }
         });
         await persistRegistros();
       }
@@ -1115,7 +1218,7 @@ function buscarRecibosFaltantes(){
 function addNextMonth(){
   requireAdmin(async ()=>{
     const startMonday = nextWeeklyStartMonday();
-    const newRows = generateWeekdayPeriods(startMonday, 1, state.config.caregivers);
+    const newRows = generateWeekdayPeriods(startMonday, 1, activeCaregivers());
     newRows.forEach((r,i)=>{ r.semana = nextSemanaFor(r.year, r.month, r.cuidadoraId, newRows.slice(0,i)); });
     state.registros = state.registros.concat(newRows);
     await persistRegistros();
@@ -1157,7 +1260,7 @@ function openAddRowModal(y,m){
         <p class="muted small">Solo se agrega esta fila; no cambia las demás. La fecha es el lunes (turnos lun–vie) o el sábado (fines de semana), y el período se calcula solo.</p>
         <div class="form-grid">
           <label>Cuidadora
-            <select id="nf-cuidadora">${state.config.caregivers.map(c=>`<option value="${c.id}">${c.name}</option>`).join("")}</select>
+            <select id="nf-cuidadora">${activeCaregivers().concat(state.config.caregivers.filter(c=>c.inactive)).map(c=>`<option value="${c.id}">${c.name}${c.inactive?" (inactiva)":""}</option>`).join("")}</select>
           </label>
           <label>Fecha
             <input type="date" id="nf-fecha" value="${isoDate(y,m,1)}" />
