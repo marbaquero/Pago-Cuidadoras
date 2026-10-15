@@ -600,7 +600,7 @@ function render(){
           const k = monthKeyOf(m);
           return `<button class="nav-item ${state.view===k?'active':''}" data-view="${k}"><span class="nav-icon">🗓️</span>${monthLabel(m.year,m.month)}</button>`;
         }).join("")}
-        ${state.isAdmin ? `<button class="add-month-btn" id="add-month-btn"><span>＋</span> Agregar semana (lun–vie)</button>` : ""}
+        ${state.isAdmin ? `<button class="add-month-btn" id="add-month-btn"><span>＋</span> Agregar pago</button>` : ""}
       </div>
       <div class="sidebar-foot">
         ${state.isAdmin ? `<button class="admin-toggle" id="add-care-btn"><span class="dot" style="background:var(--amber)"></span>Agregar cuidadora</button>` : ""}
@@ -624,7 +624,11 @@ function render(){
   });
   document.getElementById("admin-toggle").addEventListener("click", toggleAdmin);
   const addBtn = document.getElementById("add-month-btn");
-  if (addBtn) addBtn.addEventListener("click", addNextMonth);
+  if (addBtn) addBtn.addEventListener("click", ()=>{
+    const mm = /^(\d{4})-(\d{2})$/.exec(state.view || "");
+    if (!mm) return showToast("Abre primero un mes y luego pulsa Agregar pago.");
+    openAddRowModal(+mm[1], +mm[2]);
+  });
   const addCareBtn = document.getElementById("add-care-btn");
   if (addCareBtn) addCareBtn.addEventListener("click", openAddCaregiverModal);
   const ratesBtn = document.getElementById("edit-rates-btn");
