@@ -608,7 +608,7 @@ function render(){
         ${state.isAdmin && looksReseeded() ? `<button class="admin-toggle" id="restore-btn"><span class="dot" style="background:var(--brick)"></span>Restaurar sept. y oct.</button>` : ""}
         ${state.isAdmin && !looksReseeded() && !octFixDone() ? `<button class="admin-toggle" id="fix-oct-btn"><span class="dot" style="background:var(--amber)"></span>Corregir octubre 2026</button>` : ""}
         ${state.isAdmin && !looksReseeded() && !staffOct15Done() ? `<button class="admin-toggle" id="staff-oct15-btn"><span class="dot" style="background:var(--amber)"></span>Actualizar equipo (Genesis)</button>` : ""}
-        ${state.isAdmin && weekdayFixes().length ? `<button class="admin-toggle" id="fix-weekdays-btn"><span class="dot" style="background:var(--amber)"></span>Ajustar períodos lun–vie (${weekdayFixes().length})</button>` : ""}
+        ${state.isAdmin && cleanupCount() ? `<button class="admin-toggle" id="fix-weekdays-btn"><span class="dot" style="background:var(--amber)"></span>Ajustar períodos y borrar repetidas (${cleanupCount()})</button>` : ""}
         ${state.isAdmin && missingReceipts().length ? `<button class="admin-toggle" id="find-receipts-btn"><span class="dot" style="background:var(--amber)"></span>Buscar recibos faltantes (${missingReceipts().length})</button>` : ""}
         <button class="admin-toggle ${state.isAdmin?'on':''}" id="admin-toggle"><span class="dot"></span>${state.isAdmin ? "Administrador activo" : "Modo administrador"}</button>
       </div>
@@ -1297,20 +1297,50 @@ function weekdayFixFor(r){
   if (r.fecha === fecha && r.periodo === periodo) return null;
   return { fecha, periodo };
 }
+// Filas PENDIENTES repetidas (misma cuidadora y mismo período, p. ej. semanas agregadas dos veces por error).
+// Se conserva la de menor "Semana"; nunca se borra una pagada ni una con comprobante.
+function duplicateRows(){
+  const fixOf = new Map(state.registros.map(r=>[r, weekdayFixFor(r)]));
+  const keyOf = r=> r.cuidadoraId+"|"+((fixOf.get(r)||{}).fecha || r.fecha);
+  const groups = new Map();
+  state.registros.forEach(r=>{ const k=keyOf(r); (groups.get(k)||groups.set(k,[]).get(k)).push(r); });
+  const dups = [];
+  groups.forEach(list=>{
+    if (list.length < 2) return;
+    const keep = list.find(r=>r.estado==="Pagado" || r.comprobante)
+      || list.slice().sort((x,y)=>(parseInt(x.semana,10)||99)-(parseInt(y.semana,10)||99))[0];
+    list.forEach(r=>{ if (r!==keep && r.estado!=="Pagado" && !r.comprobante) dups.push(r); });
+  });
+  return dups;
+}
 function weekdayFixes(){
   return state.registros.map(r=>({ r, fix: weekdayFixFor(r) })).filter(x=>x.fix);
 }
+function cleanupCount(){ return weekdayFixes().length + duplicateRows().length; }
 function runWeekdayFix(){
   requireAdmin(async ()=>{
     const list = weekdayFixes();
-    if (!list.length) return showToast("No hay períodos por ajustar.");
-    const sample = list.slice(0,6).map(x=>"• "+caregiverById(x.r.cuidadoraId).name+": "+x.r.periodo+" → "+x.fix.periodo).join("\n");
-    if (!confirm("Esto ajusta "+list.length+" filas PENDIENTES de Aracely e Ibeth al período lunes–viernes (no toca las pagadas ni los montos):\n\n"
-      + sample + (list.length>6 ? "\n• …" : "") + "\n\n¿Continuar?")) return;
-    list.forEach(x=>{ x.r.fecha = x.fix.fecha; x.r.periodo = x.fix.periodo; });
+    const dups = duplicateRows();
+    if (!list.length && !dups.length) return showToast("No hay nada por ajustar.");
+    const sample = list.slice(0,5).map(x=>"• "+caregiverById(x.r.cuidadoraId).name+": "+x.r.periodo+" → "+x.fix.periodo).join("\n");
+    const dupTxt = dups.slice(0,6).map(r=>"• "+caregiverById(r.cuidadoraId).name+": "+r.periodo+" (Semana "+r.semana+", "+monthLabel(r.year,r.month)+")").join("\n");
+    const msg = (list.length ? "AJUSTAR "+list.length+" períodos PENDIENTES a lunes–viernes (Aracely e Ibeth; no toca pagadas ni montos):\n"+sample+(list.length>5?"\n• …":"")+"\n\n" : "")
+      + (dups.length ? "BORRAR "+dups.length+" filas PENDIENTES repetidas (se conserva la de menor número de semana):\n"+dupTxt+(dups.length>6?"\n• …":"")+"\n\n" : "")
+      + "¿Continuar?";
+    if (!confirm(msg)) return;
+    const touched = new Set();
+    list.forEach(x=>{ x.r.fecha = x.fix.fecha; x.r.periodo = x.fix.periodo; touched.add(x.r.cuidadoraId+"|"+x.r.year+"|"+x.r.month); });
+    dups.forEach(r=>touched.add(r.cuidadoraId+"|"+r.year+"|"+r.month));
+    state.registros = state.registros.filter(r=>!dups.includes(r));
+    // Renumera "Semana" (solo filas pendientes) en los meses tocados: 1, 2, 3… por fecha.
+    touched.forEach(k=>{
+      const [cid,y,m] = k.split("|");
+      const rows = state.registros.filter(r=>r.cuidadoraId===cid && r.year===+y && r.month===+m).sort((a,b)=>a.fecha<b.fecha?-1:a.fecha>b.fecha?1:0);
+      rows.forEach((r,i)=>{ if (r.estado!=="Pagado") r.semana = i+1; });
+    });
     await persistRegistros();
     render();
-    showToast("Períodos ajustados ("+list.length+" filas).");
+    showToast("Listo: "+list.length+" períodos ajustados, "+dups.length+" filas repetidas borradas.");
   });
 }
 
@@ -1369,10 +1399,42 @@ function buscarRecibosFaltantes(){
 }
 
 /* ---------------- Add month ---------------- */
+// Semanas (lun–vie) cuyo viernes cae en el mes y/o año dados y que a alguna cuidadora activa todavía le falta.
+// Devuelve [{monday, caregivers:[...]}] en orden cronológico. Una fila "existe" si coincide la fecha o el período.
+function missingWeeksForMonth(y, m){
+  const out = [];
+  const act = activeCaregivers();
+  const first = new Date(y, m-1, 1), last = new Date(y, m-1, daysInMonth(y,m));
+  for (let monday = mostRecentOrSameMonday(first); monday <= last; monday = addDays(monday, 7)){
+    const friday = addDays(monday, 4);
+    if (friday.getFullYear()!==y || friday.getMonth()!==m-1) continue;   // la semana se archiva en el mes de su viernes
+    const missing = act.filter(c=>{
+      const weekend = scheduleTypeOf(c) === "weekend";
+      const start = weekend ? addDays(monday, 5) : monday;
+      const iso = toISO(start), per = periodInfo(c, iso).periodo;
+      return !state.registros.some(r=> r.cuidadoraId===c.id && (r.fecha===iso || (r.year===y && r.month===m && String(r.periodo).trim()===per)));
+    });
+    if (missing.length) out.push({monday: new Date(monday), caregivers: missing});
+  }
+  return out;
+}
 function addNextMonth(){
   requireAdmin(async ()=>{
-    const startMonday = nextWeeklyStartMonday();
-    const newRows = generateWeekdayPeriods(startMonday, 1, activeCaregivers());
+    // Si estás viendo un mes, la semana nueva se agrega AHÍ (la primera semana que falte).
+    const mm = /^(\d{4})-(\d{2})$/.exec(state.view || "");
+    let startMonday, cgs = activeCaregivers();
+    if (mm){
+      const y = +mm[1], m = +mm[2];
+      const missing = missingWeeksForMonth(y, m);
+      if (!missing.length){
+        showToast("En "+monthLabel(y,m)+" ya están todas las semanas lun–vie. Para otra, agrégala con \"＋ Agregar pago\".");
+        return;
+      }
+      startMonday = missing[0].monday; cgs = missing[0].caregivers;
+    } else {
+      startMonday = nextWeeklyStartMonday();
+    }
+    const newRows = generateWeekdayPeriods(startMonday, 1, cgs);
     newRows.forEach((r,i)=>{ r.semana = nextSemanaFor(r.year, r.month, r.cuidadoraId, newRows.slice(0,i)); });
     state.registros = state.registros.concat(newRows);
     await persistRegistros();
