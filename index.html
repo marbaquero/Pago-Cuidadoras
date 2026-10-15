@@ -1369,10 +1369,42 @@ function buscarRecibosFaltantes(){
 }
 
 /* ---------------- Add month ---------------- */
+// Semanas (lun–vie) cuyo viernes cae en el mes y/o año dados y que a alguna cuidadora activa todavía le falta.
+// Devuelve [{monday, caregivers:[...]}] en orden cronológico. Una fila "existe" si coincide la fecha o el período.
+function missingWeeksForMonth(y, m){
+  const out = [];
+  const act = activeCaregivers();
+  const first = new Date(y, m-1, 1), last = new Date(y, m-1, daysInMonth(y,m));
+  for (let monday = mostRecentOrSameMonday(first); monday <= last; monday = addDays(monday, 7)){
+    const friday = addDays(monday, 4);
+    if (friday.getFullYear()!==y || friday.getMonth()!==m-1) continue;   // la semana se archiva en el mes de su viernes
+    const missing = act.filter(c=>{
+      const weekend = scheduleTypeOf(c) === "weekend";
+      const start = weekend ? addDays(monday, 5) : monday;
+      const iso = toISO(start), per = periodInfo(c, iso).periodo;
+      return !state.registros.some(r=> r.cuidadoraId===c.id && (r.fecha===iso || (r.year===y && r.month===m && String(r.periodo).trim()===per)));
+    });
+    if (missing.length) out.push({monday: new Date(monday), caregivers: missing});
+  }
+  return out;
+}
 function addNextMonth(){
   requireAdmin(async ()=>{
-    const startMonday = nextWeeklyStartMonday();
-    const newRows = generateWeekdayPeriods(startMonday, 1, activeCaregivers());
+    // Si estás viendo un mes, la semana nueva se agrega AHÍ (la primera semana que falte).
+    const mm = /^(\d{4})-(\d{2})$/.exec(state.view || "");
+    let startMonday, cgs = activeCaregivers();
+    if (mm){
+      const y = +mm[1], m = +mm[2];
+      const missing = missingWeeksForMonth(y, m);
+      if (!missing.length){
+        showToast("En "+monthLabel(y,m)+" ya están todas las semanas lun–vie. Para otra, agrégala con \"＋ Agregar pago\".");
+        return;
+      }
+      startMonday = missing[0].monday; cgs = missing[0].caregivers;
+    } else {
+      startMonday = nextWeeklyStartMonday();
+    }
+    const newRows = generateWeekdayPeriods(startMonday, 1, cgs);
     newRows.forEach((r,i)=>{ r.semana = nextSemanaFor(r.year, r.month, r.cuidadoraId, newRows.slice(0,i)); });
     state.registros = state.registros.concat(newRows);
     await persistRegistros();
