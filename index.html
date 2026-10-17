@@ -600,6 +600,7 @@ function render(){
           const k = monthKeyOf(m);
           return `<button class="nav-item ${state.view===k?'active':''}" data-view="${k}"><span class="nav-icon">🗓️</span>${monthLabel(m.year,m.month)}</button>`;
         }).join("")}
+        ${state.isAdmin ? `<button class="add-month-btn" id="add-month-btn"><span>＋</span> Agregar pago</button>` : ""}
       </div>
       <div class="sidebar-foot">
         ${state.isAdmin ? `<button class="admin-toggle" id="add-care-btn"><span class="dot" style="background:var(--amber)"></span>Agregar cuidadora</button>` : ""}
@@ -620,7 +621,12 @@ function render(){
   });
   document.getElementById("admin-toggle").addEventListener("click", toggleAdmin);
   const addBtn = document.getElementById("add-month-btn");
-  if (addBtn) addBtn.addEventListener("click", addNextMonth);
+  if (addBtn) addBtn.addEventListener("click", ()=>{
+    let y,m;
+    if (state.view && state.view!=="resumen") { [y,m] = state.view.split("-").map(Number); }
+    else { const ms=distinctMonths(); const now=new Date(); const cur=ms.find(x=>x.year===now.getFullYear()&&x.month===now.getMonth()+1)||ms[0]; if(!cur) return; y=cur.year; m=cur.month; }
+    openAddRowModal(y,m);
+  });
   const addCareBtn = document.getElementById("add-care-btn");
   if (addCareBtn) addCareBtn.addEventListener("click", openAddCaregiverModal);
   const ratesBtn = document.getElementById("edit-rates-btn");
