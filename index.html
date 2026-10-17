@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
 <title>Pagos — Cuidadoras</title>
-<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%23123F3D'/%3E%3Ctext x='50' y='68' font-size='50' text-anchor='middle' fill='white' font-family='serif'%3E$%3C/text%3E%3C/svg%3E" />
+<link rel="apple-touch-icon" href="icono-pagos-cuidadoras.png">
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="Pagos" />
@@ -56,7 +56,7 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);font-family:v
 .nav-icon{font-size:14px;width:18px;text-align:center;}
 .add-month-btn{display:flex;align-items:center;gap:8px;padding:9px 12px;border-radius:9px;background:rgba(255,255,255,0.06);border:1px dashed rgba(255,255,255,0.25);color:rgba(255,255,255,0.7);font-size:12.5px;cursor:pointer;font-family:var(--sans);margin-top:4px;}
 .add-month-btn:hover{background:rgba(255,255,255,0.1);}
-.sidebar-foot{display:flex;flex-direction:column;gap:8px;padding-top:12px;border-top:1px solid rgba(255,255,255,0.12);}
+.sidebar-foot{margin-top:auto;display:flex;flex-direction:column;gap:8px;}
 .admin-toggle{width:100%;display:flex;align-items:center;gap:8px;padding:9px 10px;border-radius:8px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:rgba(255,255,255,0.8);font-size:12px;cursor:pointer;font-family:var(--sans);}
 .admin-toggle.on{background:rgba(111,154,114,0.25);border-color:var(--sage);color:#fff;}
 .admin-toggle .dot{width:7px;height:7px;border-radius:50%;background:rgba(255,255,255,0.3);}
@@ -600,22 +600,19 @@ function render(){
           const k = monthKeyOf(m);
           return `<button class="nav-item ${state.view===k?'active':''}" data-view="${k}"><span class="nav-icon">🗓️</span>${monthLabel(m.year,m.month)}</button>`;
         }).join("")}
-        ${state.isAdmin ? `<button class="add-month-btn" id="add-month-btn"><span>＋</span> Agregar pago</button>` : ""}
+        ${state.isAdmin ? `<button class="add-month-btn" id="add-month-btn"><span>＋</span> Agregar semana (lun–vie)</button>` : ""}
       </div>
       <div class="sidebar-foot">
         ${state.isAdmin ? `<button class="admin-toggle" id="add-care-btn"><span class="dot" style="background:var(--amber)"></span>Agregar cuidadora</button>` : ""}
         ${state.isAdmin ? `<button class="admin-toggle" id="edit-rates-btn"><span class="dot" style="background:var(--amber)"></span>Editar tarifas</button>` : ""}
         ${state.isAdmin && looksReseeded() ? `<button class="admin-toggle" id="restore-btn"><span class="dot" style="background:var(--brick)"></span>Restaurar sept. y oct.</button>` : ""}
         ${state.isAdmin && !looksReseeded() && !octFixDone() ? `<button class="admin-toggle" id="fix-oct-btn"><span class="dot" style="background:var(--amber)"></span>Corregir octubre 2026</button>` : ""}
-        ${state.isAdmin && !looksReseeded() && !staffOct15Done() ? `<button class="admin-toggle" id="staff-oct15-btn"><span class="dot" style="background:var(--amber)"></span>Actualizar equipo (Genesis)</button>` : ""}
-        ${state.isAdmin && cleanupCount() ? `<button class="admin-toggle" id="fix-weekdays-btn"><span class="dot" style="background:var(--amber)"></span>Ajustar períodos y borrar repetidas (${cleanupCount()})</button>` : ""}
         ${state.isAdmin && missingReceipts().length ? `<button class="admin-toggle" id="find-receipts-btn"><span class="dot" style="background:var(--amber)"></span>Buscar recibos faltantes (${missingReceipts().length})</button>` : ""}
         <button class="admin-toggle ${state.isAdmin?'on':''}" id="admin-toggle"><span class="dot"></span>${state.isAdmin ? "Administrador activo" : "Modo administrador"}</button>
       </div>
     </div>
     <div class="main">
       <div class="sync-banner"><span class="sync-dot"></span><span id="sync-pill">Sincronizado</span> · datos compartidos en tiempo real</div>
-      ${dueReminders().map(r=>`<div class="sync-banner" style="background:#FEF3C7;color:#92400E;">⏰ ${r.texto}${state.isAdmin ? ` <button class="btn btn-ghost sm" data-rem-done="${r.id}">Hecho</button>` : ""}</div>`).join("")}
       <div class="content stack-lg" id="content"></div>
     </div>`;
 
@@ -624,27 +621,13 @@ function render(){
   });
   document.getElementById("admin-toggle").addEventListener("click", toggleAdmin);
   const addBtn = document.getElementById("add-month-btn");
-  if (addBtn) addBtn.addEventListener("click", ()=>{
-    const mm = /^(\d{4})-(\d{2})$/.exec(state.view || "");
-    if (!mm) return showToast("Abre primero un mes y luego pulsa Agregar pago.");
-    openAddRowModal(+mm[1], +mm[2]);
-  });
+  if (addBtn) addBtn.addEventListener("click", addNextMonth);
   const addCareBtn = document.getElementById("add-care-btn");
   if (addCareBtn) addCareBtn.addEventListener("click", openAddCaregiverModal);
   const ratesBtn = document.getElementById("edit-rates-btn");
   if (ratesBtn) ratesBtn.addEventListener("click", openEditRatesModal);
   const fixOctBtn = document.getElementById("fix-oct-btn");
   if (fixOctBtn) fixOctBtn.addEventListener("click", runOctFix);
-  const fixWdBtn = document.getElementById("fix-weekdays-btn");
-  if (fixWdBtn) fixWdBtn.addEventListener("click", runWeekdayFix);
-  const staffBtn = document.getElementById("staff-oct15-btn");
-  if (staffBtn) staffBtn.addEventListener("click", runStaffOct15);
-  document.querySelectorAll("[data-rem-done]").forEach(b=>{
-    b.addEventListener("click", async ()=>{
-      const rem = (state.config.recordatorios||[]).find(x=>x.id===b.dataset.remDone);
-      if (rem){ rem.hecho = true; await persistConfig(); render(); }
-    });
-  });
   const restoreBtn = document.getElementById("restore-btn");
   if (restoreBtn) restoreBtn.addEventListener("click", restoreSepOct2026);
   const findRecBtn = document.getElementById("find-receipts-btn");
@@ -1177,177 +1160,6 @@ function runOctFix(){
   });
 }
 
-/* ---------------- One-time change: equipo (15 oct 2026) ---------------- */
-// • Ibeth pasa a $150/sem desde el lunes 19 oct (solo filas PENDIENTES desde esa fecha).
-// • Carmita queda INACTIVA: se conserva todo su historial pagado; se quitan solo sus filas pendientes desde el 10 oct.
-// • Entra Genesis (fines de semana, $70 = $35 sáb + $35 dom) con su día de inducción (vie 16 oct, $35).
-// • Recordatorio el 15 dic (día 60 de Genesis): revisar si sube a $100 por fin de semana.
-// Se ejecuta una sola vez (queda marcado en la configuración).
-function staffOct15Done(){ return !!(state.config.migraciones && state.config.migraciones.staffOct15); }
-function applyStaffOct15(){
-  const cg = state.config.caregivers;
-  const rid = (tag)=> "r_"+tag+"_"+Math.random().toString(36).slice(2,7);
-
-  // 1) Ibeth
-  const ibeth = cg.find(c=>c.id==="ibeth");
-  if (ibeth){
-    ibeth.weeklyRate = 150;
-    state.registros.forEach(r=>{
-      if (r.cuidadoraId==="ibeth" && r.estado!=="Pagado" && r.fecha >= "2026-10-19") r.monto = periodInfo(ibeth, r.fecha).monto;
-    });
-  }
-
-  // 2) Carmita inactiva (el historial pagado no se toca)
-  const carmita = cg.find(c=>c.id==="carmita");
-  const removed = [];
-  if (carmita){
-    carmita.inactive = true;
-    carmita.inactivaDesde = "2026-10-10";
-    state.registros = state.registros.filter(r=>{
-      const drop = r.cuidadoraId==="carmita" && r.estado!=="Pagado" && r.fecha >= "2026-10-10";
-      if (drop) removed.push(r);
-      return !drop;
-    });
-  }
-
-  // 3) Genesis
-  let genesis = cg.find(c=>c.id==="genesis");
-  if (!genesis){
-    genesis = { id:"genesis", name:"Genesis", turno:"Fines de semana (sáb–dom)", weeklyRate:70, color:"#D97706", scheduleType:"weekend" };
-    cg.push(genesis);
-  }
-  delete genesis.inactive;
-  const has = (f)=> state.registros.some(x=>x.cuidadoraId==="genesis" && x.fecha===f);
-  if (!has("2026-10-16")){
-    state.registros.push({
-      id:rid("gen_ind"), year:2026, month:10, semana:1, periodStyle:"weekend", cuidadoraId:"genesis",
-      fecha:"2026-10-16", periodo:"16 oct (inducción)", monto:35,
-      metodo:"Transferencia", estado:"Pendiente", comprobante:""
-    });
-  }
-  // Fines de semana: mismo horizonte que tenían las filas pendientes de Carmita (desde el sáb 17 oct).
-  let sats = removed.filter(r=>r.fecha >= "2026-10-17").map(r=>({ year:r.year, month:r.month, fecha:r.fecha }));
-  if (!sats.length) sats = ["2026-10-17","2026-10-24","2026-10-31"].map(f=>({ year:2026, month:10, fecha:f }));
-  sats.sort((a,b)=> String(a.fecha).localeCompare(String(b.fecha)));
-  sats.forEach(s=>{
-    if (has(s.fecha)) return;
-    const info = periodInfo(genesis, s.fecha);
-    state.registros.push({
-      id:rid("gen"), year:s.year, month:s.month, semana:nextSemanaFor(s.year, s.month, "genesis"),
-      periodStyle:"weekend", cuidadoraId:"genesis", fecha:s.fecha, periodo:info.periodo, monto:info.monto,
-      metodo:"Transferencia", estado:"Pendiente", comprobante:""
-    });
-  });
-
-  state.config.recordatorios = (state.config.recordatorios||[]).filter(x=>x.id!=="genesis60").concat([
-    { id:"genesis60", fecha:"2026-12-15", texto:"Genesis cumple 60 días: revisar si su pago sube a $100 por fin de semana (si el desempeño es satisfactorio)." }
-  ]);
-  state.config.migraciones = Object.assign({}, state.config.migraciones, { staffOct15:true });
-}
-function runStaffOct15(){
-  requireAdmin(async ()=>{
-    const ok = confirm("Esto actualiza el equipo (no toca nada ya marcado como Pagado):\n\n"
-      + "• Ibeth: $150/semana desde el lunes 19 oct (solo filas pendientes)\n"
-      + "• Carmita: pasa a INACTIVA (se conserva su historial). Se quitan sus filas pendientes desde el 10 oct\n"
-      + "• Genesis (nueva): $70 por fin de semana ($35 sáb + $35 dom), desde el sáb 17 oct, más su día de inducción del vie 16 oct ($35)\n"
-      + "• Recordatorio el 15 dic para revisar el aumento de Genesis a $100\n\n¿Continuar?");
-    if (!ok) return;
-    applyStaffOct15();
-    await persistConfig();
-    await persistRegistros();
-    state.view = monthKey(2026,10);
-    render();
-    showToast("Equipo actualizado: Genesis agregada y Carmita inactiva.");
-  });
-}
-// Recordatorios con fecha: aparecen una semana antes y se pueden marcar como hechos (solo administrador).
-function dueReminders(){
-  const limit = toISO(addDays(new Date(), 7));
-  return (state.config.recordatorios||[]).filter(r=> !r.hecho && r.fecha <= limit);
-}
-
-/* ---------------- Ajuste de períodos lun–vie (Aracely e Ibeth) ---------------- */
-// Los turnos de semana se pagan de lunes a viernes. Algunas filas PENDIENTES quedaron con bloques de
-// 7 días (p. ej. "8–14 noviembre") o con la fecha en otro día. Este ajuste lleva cada una a su
-// lunes y al período lun–vie ("9–13 noviembre"). No toca filas Pagado, no cambia montos ni semanas, y
-// no toca relevos de fin de semana (períodos cortos de 1–2 días o que empiezan en sábado).
-function parseDayMonth(txt, defMonth){
-  const m = String(txt||"").match(/^\s*(\d{1,2})(?:\s+([A-Za-zÁÉÍÓÚáéíóúñÑ]+))?/);
-  if (!m) return null;
-  let mon = defMonth;
-  if (m[2]){
-    const i = MONTH_NAMES.findIndex(n => n.slice(0,3) === m[2].toLowerCase().slice(0,3));
-    if (i >= 0) mon = i+1;
-  }
-  return { day: parseInt(m[1],10), month: mon };
-}
-function weekdayFixFor(r){
-  const c = caregiverById(r.cuidadoraId);
-  if (!c || scheduleTypeOf(c) !== "weekday" || r.estado === "Pagado") return null;
-  const parts = String(r.periodo||"").split(/[–-]/);
-  if (parts.length < 2) return null;
-  const a = parseDayMonth(parts[0], r.month);
-  if (!a) return null;
-  const b = parseDayMonth(parts[1], a.month);
-  if (!b) return null;
-  let sy = r.year; if (a.month > r.month) sy -= 1;
-  const start = new Date(sy, a.month-1, a.day);
-  let ey = sy; if (b.month < a.month) ey += 1;
-  const end = new Date(ey, b.month-1, b.day);
-  const span = Math.round((end - start) / 86400000);
-  if (span < 4 || start.getDay() === 6) return null;   // relevo de fin de semana u otro período corto
-  const monday = nextOrSameMonday(start);
-  const fecha = toISO(monday), periodo = periodoLabelRange(monday, addDays(monday, 4));
-  if (r.fecha === fecha && r.periodo === periodo) return null;
-  return { fecha, periodo };
-}
-// Filas PENDIENTES repetidas (misma cuidadora y mismo período, p. ej. semanas agregadas dos veces por error).
-// Se conserva la de menor "Semana"; nunca se borra una pagada ni una con comprobante.
-function duplicateRows(){
-  const fixOf = new Map(state.registros.map(r=>[r, weekdayFixFor(r)]));
-  const keyOf = r=> r.cuidadoraId+"|"+((fixOf.get(r)||{}).fecha || r.fecha);
-  const groups = new Map();
-  state.registros.forEach(r=>{ const k=keyOf(r); (groups.get(k)||groups.set(k,[]).get(k)).push(r); });
-  const dups = [];
-  groups.forEach(list=>{
-    if (list.length < 2) return;
-    const keep = list.find(r=>r.estado==="Pagado" || r.comprobante)
-      || list.slice().sort((x,y)=>(parseInt(x.semana,10)||99)-(parseInt(y.semana,10)||99))[0];
-    list.forEach(r=>{ if (r!==keep && r.estado!=="Pagado" && !r.comprobante) dups.push(r); });
-  });
-  return dups;
-}
-function weekdayFixes(){
-  return state.registros.map(r=>({ r, fix: weekdayFixFor(r) })).filter(x=>x.fix);
-}
-function cleanupCount(){ return weekdayFixes().length + duplicateRows().length; }
-function runWeekdayFix(){
-  requireAdmin(async ()=>{
-    const list = weekdayFixes();
-    const dups = duplicateRows();
-    if (!list.length && !dups.length) return showToast("No hay nada por ajustar.");
-    const sample = list.slice(0,5).map(x=>"• "+caregiverById(x.r.cuidadoraId).name+": "+x.r.periodo+" → "+x.fix.periodo).join("\n");
-    const dupTxt = dups.slice(0,6).map(r=>"• "+caregiverById(r.cuidadoraId).name+": "+r.periodo+" (Semana "+r.semana+", "+monthLabel(r.year,r.month)+")").join("\n");
-    const msg = (list.length ? "AJUSTAR "+list.length+" períodos PENDIENTES a lunes–viernes (Aracely e Ibeth; no toca pagadas ni montos):\n"+sample+(list.length>5?"\n• …":"")+"\n\n" : "")
-      + (dups.length ? "BORRAR "+dups.length+" filas PENDIENTES repetidas (se conserva la de menor número de semana):\n"+dupTxt+(dups.length>6?"\n• …":"")+"\n\n" : "")
-      + "¿Continuar?";
-    if (!confirm(msg)) return;
-    const touched = new Set();
-    list.forEach(x=>{ x.r.fecha = x.fix.fecha; x.r.periodo = x.fix.periodo; touched.add(x.r.cuidadoraId+"|"+x.r.year+"|"+x.r.month); });
-    dups.forEach(r=>touched.add(r.cuidadoraId+"|"+r.year+"|"+r.month));
-    state.registros = state.registros.filter(r=>!dups.includes(r));
-    // Renumera "Semana" (solo filas pendientes) en los meses tocados: 1, 2, 3… por fecha.
-    touched.forEach(k=>{
-      const [cid,y,m] = k.split("|");
-      const rows = state.registros.filter(r=>r.cuidadoraId===cid && r.year===+y && r.month===+m).sort((a,b)=>a.fecha<b.fecha?-1:a.fecha>b.fecha?1:0);
-      rows.forEach((r,i)=>{ if (r.estado!=="Pagado") r.semana = i+1; });
-    });
-    await persistRegistros();
-    render();
-    showToast("Listo: "+list.length+" períodos ajustados, "+dups.length+" filas repetidas borradas.");
-  });
-}
-
 /* ---------------- Restore Sep/Oct 2026 + bulk receipt search ---------------- */
 // Septiembre ya pagado + octubre, tal como estaban (montos y fechas de los pagos hechos). Solo se ofrece
 // cuando septiembre aparece sin ningún pago marcado como Pagado (señal de que los datos se reiniciaron).
@@ -1403,42 +1215,10 @@ function buscarRecibosFaltantes(){
 }
 
 /* ---------------- Add month ---------------- */
-// Semanas (lun–vie) cuyo viernes cae en el mes y/o año dados y que a alguna cuidadora activa todavía le falta.
-// Devuelve [{monday, caregivers:[...]}] en orden cronológico. Una fila "existe" si coincide la fecha o el período.
-function missingWeeksForMonth(y, m){
-  const out = [];
-  const act = activeCaregivers();
-  const first = new Date(y, m-1, 1), last = new Date(y, m-1, daysInMonth(y,m));
-  for (let monday = mostRecentOrSameMonday(first); monday <= last; monday = addDays(monday, 7)){
-    const friday = addDays(monday, 4);
-    if (friday.getFullYear()!==y || friday.getMonth()!==m-1) continue;   // la semana se archiva en el mes de su viernes
-    const missing = act.filter(c=>{
-      const weekend = scheduleTypeOf(c) === "weekend";
-      const start = weekend ? addDays(monday, 5) : monday;
-      const iso = toISO(start), per = periodInfo(c, iso).periodo;
-      return !state.registros.some(r=> r.cuidadoraId===c.id && (r.fecha===iso || (r.year===y && r.month===m && String(r.periodo).trim()===per)));
-    });
-    if (missing.length) out.push({monday: new Date(monday), caregivers: missing});
-  }
-  return out;
-}
 function addNextMonth(){
   requireAdmin(async ()=>{
-    // Si estás viendo un mes, la semana nueva se agrega AHÍ (la primera semana que falte).
-    const mm = /^(\d{4})-(\d{2})$/.exec(state.view || "");
-    let startMonday, cgs = activeCaregivers();
-    if (mm){
-      const y = +mm[1], m = +mm[2];
-      const missing = missingWeeksForMonth(y, m);
-      if (!missing.length){
-        showToast("En "+monthLabel(y,m)+" ya están todas las semanas lun–vie. Para otra, agrégala con \"＋ Agregar pago\".");
-        return;
-      }
-      startMonday = missing[0].monday; cgs = missing[0].caregivers;
-    } else {
-      startMonday = nextWeeklyStartMonday();
-    }
-    const newRows = generateWeekdayPeriods(startMonday, 1, cgs);
+    const startMonday = nextWeeklyStartMonday();
+    const newRows = generateWeekdayPeriods(startMonday, 1, activeCaregivers());
     newRows.forEach((r,i)=>{ r.semana = nextSemanaFor(r.year, r.month, r.cuidadoraId, newRows.slice(0,i)); });
     state.registros = state.registros.concat(newRows);
     await persistRegistros();
