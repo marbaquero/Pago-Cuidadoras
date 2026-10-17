@@ -600,9 +600,9 @@ function render(){
           const k = monthKeyOf(m);
           return `<button class="nav-item ${state.view===k?'active':''}" data-view="${k}"><span class="nav-icon">🗓️</span>${monthLabel(m.year,m.month)}</button>`;
         }).join("")}
-        ${state.isAdmin ? `<button class="add-month-btn" id="add-month-btn"><span>＋</span> Agregar pago</button>` : ""}
       </div>
       <div class="sidebar-foot">
+        ${state.isAdmin ? `<button class="admin-toggle" id="add-month-btn"><span class="dot" style="background:var(--amber)"></span>Agregar pago</button>` : ""}
         ${state.isAdmin ? `<button class="admin-toggle" id="add-care-btn"><span class="dot" style="background:var(--amber)"></span>Agregar cuidadora</button>` : ""}
         ${state.isAdmin ? `<button class="admin-toggle" id="edit-rates-btn"><span class="dot" style="background:var(--amber)"></span>Editar tarifas</button>` : ""}
         ${state.isAdmin && looksReseeded() ? `<button class="admin-toggle" id="restore-btn"><span class="dot" style="background:var(--brick)"></span>Restaurar sept. y oct.</button>` : ""}
@@ -707,7 +707,6 @@ function renderMonth(content, y, m){
   content.innerHTML = `
     <div class="row-between">
       <div class="label-eyebrow">${monthLabel(y,m)} · Cobertura 24/7</div>
-      ${state.isAdmin ? `<button class="btn btn-outline sm" id="add-row-btn">＋ Agregar pago</button>` : ""}
     </div>
 
     <div class="stat-row">
