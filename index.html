@@ -43,12 +43,12 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);font-family:v
 .config-box code{background:var(--bg);padding:2px 6px;border-radius:5px;font-family:var(--mono);font-size:12px;}
 
 /* Sidebar */
-.sidebar{width:230px;flex-shrink:0;background:var(--primary-dark);color:#EFF3F1;display:flex;flex-direction:column;padding:20px 14px;gap:18px;}
+.sidebar{width:230px;flex-shrink:0;background:var(--primary-dark);color:#EFF3F1;display:flex;flex-direction:column;padding:20px 14px;gap:14px;overflow-y:auto;}
 .brand{display:flex;align-items:center;gap:10px;padding:0 6px;}
 .brand-mark{width:34px;height:34px;border-radius:8px;background:rgba(255,255,255,0.1);display:flex;align-items:center;justify-content:center;font-size:18px;}
 .brand-title{font-weight:700;font-size:14.5px;}
 .brand-sub{font-size:11px;color:rgba(255,255,255,0.55);}
-.nav{display:flex;flex-direction:column;gap:2px;overflow-y:auto;}
+.nav{display:flex;flex-direction:column;gap:2px;flex-shrink:0;}
 .nav-group-label{font-size:10px;letter-spacing:1.2px;text-transform:uppercase;color:rgba(255,255,255,0.4);padding:10px 12px 2px;}
 .nav-item{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:9px;background:none;border:none;color:rgba(255,255,255,0.75);font-size:13.5px;cursor:pointer;text-align:left;font-family:var(--sans);width:100%;}
 .nav-item:hover{background:rgba(255,255,255,0.06);}
@@ -56,7 +56,7 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);font-family:v
 .nav-icon{font-size:14px;width:18px;text-align:center;}
 .add-month-btn{display:flex;align-items:center;gap:8px;padding:9px 12px;border-radius:9px;background:rgba(255,255,255,0.06);border:1px dashed rgba(255,255,255,0.25);color:rgba(255,255,255,0.7);font-size:12.5px;cursor:pointer;font-family:var(--sans);margin-top:4px;}
 .add-month-btn:hover{background:rgba(255,255,255,0.1);}
-.sidebar-foot{margin-top:auto;display:flex;flex-direction:column;gap:8px;}
+.sidebar-foot{margin-top:4px;padding-top:12px;border-top:1px solid rgba(255,255,255,0.12);flex-shrink:0;display:flex;flex-direction:column;gap:8px;}
 .admin-toggle{width:100%;display:flex;align-items:center;gap:8px;padding:9px 10px;border-radius:8px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:rgba(255,255,255,0.8);font-size:12px;cursor:pointer;font-family:var(--sans);}
 .admin-toggle.on{background:rgba(111,154,114,0.25);border-color:var(--sage);color:#fff;}
 .admin-toggle .dot{width:7px;height:7px;border-radius:50%;background:rgba(255,255,255,0.3);}
@@ -600,7 +600,6 @@ function render(){
           const k = monthKeyOf(m);
           return `<button class="nav-item ${state.view===k?'active':''}" data-view="${k}"><span class="nav-icon">🗓️</span>${monthLabel(m.year,m.month)}</button>`;
         }).join("")}
-        ${state.isAdmin ? `<button class="add-month-btn" id="add-month-btn"><span>＋</span> Agregar semana (lun–vie)</button>` : ""}
       </div>
       <div class="sidebar-foot">
         ${state.isAdmin ? `<button class="admin-toggle" id="add-care-btn"><span class="dot" style="background:var(--amber)"></span>Agregar cuidadora</button>` : ""}
