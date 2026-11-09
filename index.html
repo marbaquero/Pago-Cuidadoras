@@ -10,15 +10,12 @@
 <meta name="apple-mobile-web-app-title" content="Pagos" />
 
 <!-- ============================================================ -->
-<!-- CONFIGURACIÓN: credenciales de Supabase (mismo proyecto que   -->
-<!-- el inventario de medicinas — comparte la tabla kv_store y PIN)-->
+<!-- CONFIGURACIÓN: credenciales de Supabase (proyecto de clientes) -->
 <!-- ============================================================ -->
 <script>
-  window.SUPABASE_URL = "https://ywegbbdnphbbqiimqhqf.supabase.co";
-  window.SUPABASE_ANON_KEY = "sb_publishable_3RLMrZi5yuz9kxeAiMkSMw_y4foVtyu";
-  // URL de la Apps Script Web App (buscarRecibo.gs) que busca comprobantes en Drive.
-  // Reemplace con la URL /exec que obtiene al implementar el script como Aplicación Web.
-  window.RECIBO_SEARCH_URL = "https://script.google.com/macros/s/AKfycbwVWlbpCwrd4KZ9qTf-QHD0nZ7Jea7asXOqAaF2UPVeRhywBusF-3x6VNXtDHBV4pyJ/exec";
+  window.SUPABASE_URL = "https://fftnffmttuzfftntzzhu.supabase.co";
+  window.SUPABASE_ANON_KEY = "sb_publishable_f5py08cOv3Bdo0Yvm6lmbA_VBxnbEsP";
+  window.RECIBO_SEARCH_URL = "";
 </script>
 <!-- ============================================================ -->
 
@@ -163,6 +160,7 @@ table.pay-table input[type=number]{max-width:80px;}
 <script>
 /* ---------------- Supabase / kv helpers ---------------- */
 let supa = null;
+let HOUSEHOLD_ID = null;
 function initSupabase(){
   if (!window.SUPABASE_URL || window.SUPABASE_URL.includes("PASTE_") ||
       !window.SUPABASE_ANON_KEY || window.SUPABASE_ANON_KEY.includes("PASTE_")){
@@ -176,33 +174,71 @@ function initSupabase(){
   supa = window.supabase.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY);
   return true;
 }
+
+// The owner session is the only way in. The household id comes from the
+// database, never from the URL or localStorage.
+async function initOwnerSession(){
+  const { data: { session }, error } = await supa.auth.getSession();
+  if (error || !session) {
+    location.replace("https://marbaquero.github.io/portal.html");
+    return null;
+  }
+  const { data: member, error: memberError } = await supa
+    .from("household_members")
+    .select("household_id, role")
+    .eq("user_id", session.user.id)
+    .eq("role", "owner")
+    .limit(1)
+    .maybeSingle();
+  if (memberError || !member) {
+    document.getElementById("app").innerHTML = `
+      <div class="config-warning"><div class="config-box">
+        <h2>Esta cuenta no está vinculada a un hogar</h2>
+        <p>Inicie sesión con la cuenta del propietario desde el portal.</p>
+      </div></div>`;
+    return null;
+  }
+  HOUSEHOLD_ID = member.household_id;
+  return session;
+}
+
 async function kvGet(key, fallback){
-  const { data, error } = await supa.from("kv_store").select("value").eq("key", key).maybeSingle();
+  if (!HOUSEHOLD_ID) return fallback;
+  const { data, error } = await supa.from("app_kv_store")
+    .select("value")
+    .eq("household_id", HOUSEHOLD_ID)
+    .eq("key", key)
+    .maybeSingle();
   if (error){ console.error("kvGet error", key, error); return fallback; }
   return data ? data.value : fallback;
 }
-// Lectura estricta: distingue "error al leer" de "no existe todavía". Así un fallo de red
-// nunca se confunde con un proyecto vacío (que antes recreaba todos los pagos como pendientes).
+// Lectura estricta: distingue "error al leer" de "no existe todavía".
 async function kvGetStrict(key){
-  const { data, error } = await supa.from("kv_store").select("value").eq("key", key).maybeSingle();
+  if (!HOUSEHOLD_ID) return { ok:false };
+  const { data, error } = await supa.from("app_kv_store")
+    .select("value")
+    .eq("household_id", HOUSEHOLD_ID)
+    .eq("key", key)
+    .maybeSingle();
   if (error){ console.error("kvGet error", key, error); return { ok:false }; }
   return { ok:true, value: data ? data.value : null };
 }
 async function kvSet(key, value){
-  const { error } = await supa.from("kv_store").upsert({ key, value, updated_at: new Date().toISOString() });
+  if (!HOUSEHOLD_ID) return;
+  const { error } = await supa.from("app_kv_store").upsert({
+    household_id: HOUSEHOLD_ID,
+    key,
+    value,
+    updated_at: new Date().toISOString()
+  }, { onConflict: "household_id,key" });
   if (error) console.error("kvSet error", key, error);
 }
 
 /* ---------------- Constants ---------------- */
 const MONTH_NAMES = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
-const DEFAULT_CAREGIVERS = [
-  { id:"aracely", name:"Aracely", turno:"Diurno (lun–vie)", weeklyRate:200, color:"#2E86AB", scheduleType:"weekday" },
-  { id:"ibeth",   name:"Ibeth",   turno:"Nocturno (lun–vie)", weeklyRate:125, color:"#8B5CF6", scheduleType:"weekday" },
-  { id:"carmita", name:"Carmita", turno:"Fines de semana + relevos", weeklyRate:100, color:"#6F9A72", scheduleType:"weekend" }
-];
 function scheduleTypeOf(c){
   if (c && c.scheduleType) return c.scheduleType;
-  return (c && c.id === "carmita") ? "weekend" : "weekday";
+  return "weekday";
 }
 const METODOS = ["Transferencia","Efectivo","Cheque","Otro"];
 
@@ -436,12 +472,11 @@ function generateMonthRegistros(y,m,caregivers){
 
 /* ---------------- Load / bootstrap ---------------- */
 async function loadAll(){
-  const [cfgR, regsR, setR] = await Promise.all([
+  const [cfgR, regsR] = await Promise.all([
     kvGetStrict("pagos_config"),
-    kvGetStrict("pagos_registros"),
-    kvGetStrict("settings")
+    kvGetStrict("pagos_registros")
   ]);
-  if (!cfgR.ok || !regsR.ok || !setR.ok){
+  if (!cfgR.ok || !regsR.ok){
     // No se pudo leer: NO se crea ni se guarda nada. Se ofrece reintentar.
     document.getElementById("app").innerHTML = `
       <div class="config-warning"><div class="config-box">
@@ -452,31 +487,13 @@ async function loadAll(){
     document.getElementById("retry-load").addEventListener("click", ()=>{ loadAll(); });
     return;
   }
-  const cfg = cfgR.value, regs = regsR.value, settings = setR.value;
-  state.config = cfg || { caregivers: DEFAULT_CAREGIVERS };
-  if (!cfg) await kvSet("pagos_config", state.config);
-
-  if (!regs){
-    if (cfg){
-      // Hay configuración pero faltan los registros: algo raro. No se vuelve a crear automáticamente.
-      document.getElementById("app").innerHTML = `
-        <div class="config-warning"><div class="config-box">
-          <h2>No se encontraron los pagos</h2>
-          <p>La configuración existe pero no los registros. Por seguridad no se recrean solos; avise para restaurarlos.</p>
-          <button class="btn btn-primary" id="retry-load">Reintentar</button>
-        </div></div>`;
-      document.getElementById("retry-load").addEventListener("click", ()=>{ loadAll(); });
-      return;
-    }
-    // Proyecto nuevo: se crean septiembre–diciembre 2026
-    let rows = [];
-    [9,10,11,12].forEach(m => { rows = rows.concat(generateMonthRegistros(2026, m, state.config.caregivers)); });
-    state.registros = rows;
-    await kvSet("pagos_registros", state.registros);
-  } else {
-    state.registros = regs;
-  }
-  state.adminPin = settings ? settings.adminPin : null;
+  const cfg = cfgR.value, regs = regsR.value;
+  // A new household starts with no caregivers and no payments. Nothing is
+  // copied from the pilot family and nothing is auto-generated.
+  state.config = (cfg && Array.isArray(cfg.caregivers)) ? cfg : { caregivers: [] };
+  state.registros = Array.isArray(regs) ? regs : [];
+  state.adminPin = null;
+  state.isAdmin = true;
 
   const months = distinctMonths();
   state.view = months.length ? monthKeyOf(months[0]) : "resumen";
@@ -515,7 +532,7 @@ function requireAdmin(action){
   state.pendingAction = action;
   openPinModal(state.adminPin ? "enter" : "set");
 }
-function openPinModal(mode){ state.isAdmin = true; render(); if (state.pendingAction){ const a = state.pendingAction; state.pendingAction = null; a(); } return;
+function openPinModal(mode){
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
   backdrop.innerHTML = `
@@ -558,8 +575,9 @@ function openPinModal(mode){ state.isAdmin = true; render(); if (state.pendingAc
   });
 }
 function toggleAdmin(){
-  if (state.isAdmin){ state.isAdmin=false; render(); showToast("Modo administrador desactivado."); }
-  else { openPinModal(state.adminPin ? "enter" : "set"); }
+  // The owner is already authenticated by Supabase. The old 4-digit PIN was
+  // client-side only and is no longer used as a security boundary.
+  showToast("Sesión de administrador activa.");
 }
 
 /* ---------------- Derived calcs ---------------- */
@@ -591,7 +609,7 @@ function render(){
     <div class="sidebar">
       <div class="brand">
         <div class="brand-mark">💵</div>
-        <div><div class="brand-title">Pagos — Cuidadoras</div><div class="brand-sub">Rosa Emilia · Cobertura 24/7</div></div>
+        <div><div class="brand-title">Pagos — Cuidadoras</div><div class="brand-sub">Pagos del hogar</div></div>
       </div>
       <div class="nav">
         <button class="nav-item ${state.view==='resumen'?'active':''}" data-view="resumen"><span class="nav-icon">📊</span>Resumen anual</button>
@@ -602,12 +620,9 @@ function render(){
         }).join("")}
       </div>
       <div class="sidebar-foot">
-        ${state.isAdmin ? `<button class="admin-toggle" id="add-month-btn"><span class="dot" style="background:var(--amber)"></span>Agregar pago</button>` : ""}
+        ${state.isAdmin && state.config.caregivers.length ? `<button class="admin-toggle" id="add-month-btn"><span class="dot" style="background:var(--amber)"></span>Agregar pago</button>` : ""}
         ${state.isAdmin ? `<button class="admin-toggle" id="add-care-btn"><span class="dot" style="background:var(--amber)"></span>Agregar cuidadora</button>` : ""}
-        ${state.isAdmin ? `<button class="admin-toggle" id="edit-rates-btn"><span class="dot" style="background:var(--amber)"></span>Editar tarifas</button>` : ""}
-        ${state.isAdmin && looksReseeded() ? `<button class="admin-toggle" id="restore-btn"><span class="dot" style="background:var(--brick)"></span>Restaurar sept. y oct.</button>` : ""}
-        ${state.isAdmin && !looksReseeded() && !octFixDone() ? `<button class="admin-toggle" id="fix-oct-btn"><span class="dot" style="background:var(--amber)"></span>Corregir octubre 2026</button>` : ""}
-        ${state.isAdmin && missingReceipts().length ? `<button class="admin-toggle" id="find-receipts-btn"><span class="dot" style="background:var(--amber)"></span>Buscar recibos faltantes (${missingReceipts().length})</button>` : ""}
+        ${state.isAdmin && state.config.caregivers.length ? `<button class="admin-toggle" id="edit-rates-btn"><span class="dot" style="background:var(--amber)"></span>Editar tarifas</button>` : ""}
         <button class="admin-toggle ${state.isAdmin?'on':''}" id="admin-toggle"><span class="dot"></span>${state.isAdmin ? "Administrador activo" : "Modo administrador"}</button>
       </div>
     </div>
@@ -624,26 +639,40 @@ function render(){
   if (addBtn) addBtn.addEventListener("click", ()=>{
     let y,m;
     if (state.view && state.view!=="resumen") { [y,m] = state.view.split("-").map(Number); }
-    else { const ms=distinctMonths(); const now=new Date(); const cur=ms.find(x=>x.year===now.getFullYear()&&x.month===now.getMonth()+1)||ms[0]; if(!cur) return; y=cur.year; m=cur.month; }
+    else {
+      const ms=distinctMonths(); const now=new Date();
+      const cur=ms.find(x=>x.year===now.getFullYear()&&x.month===now.getMonth()+1)||ms[0];
+      if(cur){ y=cur.year; m=cur.month; } else { y=now.getFullYear(); m=now.getMonth()+1; }
+    }
     openAddRowModal(y,m);
   });
   const addCareBtn = document.getElementById("add-care-btn");
   if (addCareBtn) addCareBtn.addEventListener("click", openAddCaregiverModal);
   const ratesBtn = document.getElementById("edit-rates-btn");
   if (ratesBtn) ratesBtn.addEventListener("click", openEditRatesModal);
-  const fixOctBtn = document.getElementById("fix-oct-btn");
-  if (fixOctBtn) fixOctBtn.addEventListener("click", runOctFix);
-  const restoreBtn = document.getElementById("restore-btn");
-  if (restoreBtn) restoreBtn.addEventListener("click", restoreSepOct2026);
-  const findRecBtn = document.getElementById("find-receipts-btn");
-  if (findRecBtn) findRecBtn.addEventListener("click", buscarRecibosFaltantes);
 
   const content = document.getElementById("content");
-  if (state.view === "resumen") renderResumenAnual(content);
-  else {
+  if (!state.config.caregivers.length) {
+    renderSetup(content);
+  } else if (state.view === "resumen") {
+    renderResumenAnual(content);
+  } else {
     const [y,m] = state.view.split("-").map(Number);
     renderMonth(content, y, m);
   }
+}
+
+function renderSetup(content){
+  content.innerHTML = `
+    <div class="panel" style="max-width:640px;margin:24px auto;padding:36px 28px;text-align:center;">
+      <div class="label-eyebrow">Hogar nuevo</div>
+      <h2 style="margin:8px 0 6px;">Configura a tus cuidadoras</h2>
+      <p class="muted" style="max-width:460px;margin:0 auto 18px;">
+        Este hogar no tiene datos de otra familia. Agrega la primera cuidadora para empezar a registrar pagos.
+      </p>
+      <button class="btn btn-primary" id="setup-add-care">+ Agregar la primera cuidadora</button>
+    </div>`;
+  document.getElementById("setup-add-care").addEventListener("click", openAddCaregiverModal);
 }
 
 function renderResumenAnual(content){
@@ -974,7 +1003,7 @@ function openAddCaregiverModal(){
         <h3>Agregar cuidadora</h3>
         <div class="stack" style="margin-top:14px;">
           <label style="display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--muted);font-weight:600;">Nombre
-            <input type="text" id="ac-name" placeholder="Genesis" style="${inp}" /></label>
+            <input type="text" id="ac-name" placeholder="Ej. María" style="${inp}" /></label>
           <label style="display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--muted);font-weight:600;">Turno
             <select id="ac-turno" style="${inp}">
               <option value="weekend">Fines de semana (sáb 7am – lun 7am)</option>
@@ -1061,7 +1090,7 @@ function openEditRatesModal(){
     backdrop.innerHTML = `
       <div class="modal">
         <h3>Editar tarifas</h3>
-        <p class="muted small">Aracely e Ibeth: monto por semana (lun–vie). Carmita: monto por fin de semana (sáb+dom).</p>
+        <p class="muted small">Monto por semana para turnos de lunes a viernes; monto por fin de semana (sábado y domingo) para turnos de fin de semana.</p>
         <div class="stack" style="margin-top:14px;">
           ${state.config.caregivers.map(c=>`
             <label style="display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--muted);font-weight:600;">
@@ -1108,113 +1137,6 @@ function openEditRatesModal(){
       const names = Object.keys(changes).map(id=>caregiverById(id).name);
       showToast(names.length ? ("Tarifa actualizada: "+names.join(", ")+".") : "Sin cambios.");
     });
-  });
-}
-
-/* ---------------- One-time fix: October 2026 ---------------- */
-// Corrige las filas PENDIENTES de octubre 2026 (las pagadas no se tocan): fechas de lunes/sábado,
-// períodos, la fila que faltaba de Carmita (31 oct–1 nov), el feriado del 9 de octubre y las tarifas
-// acordadas. Se puede ejecutar una sola vez (queda marcado en la configuración).
-function octFixDone(){ return !!(state.config.migraciones && state.config.migraciones.oct2026); }
-function applyOct2026Fix(){
-  const Y = 2026, M = 10;
-  const NEW_RATES = { aracely:200, ibeth:125, carmita:100 };
-  state.config.caregivers.forEach(c=>{ if (NEW_RATES[c.id] !== undefined) c.weeklyRate = NEW_RATES[c.id]; });
-
-  const monday1 = parseISO("2026-10-05");   // semana 1 lun–vie
-  const sat1 = parseISO("2026-10-10");      // primer sábado todavía pendiente de Carmita (semana 2)
-  state.config.caregivers.forEach(c=>{
-    const weekend = scheduleTypeOf(c) === "weekend";
-    const semanas = weekend ? [2,3,4,5] : [1,2,3,4];
-    semanas.forEach((n,i)=>{
-      const start = addDays(weekend ? sat1 : monday1, 7*i);
-      let row = state.registros.find(r=>r.year===Y && r.month===M && r.cuidadoraId===c.id && parseInt(r.semana,10)===n);
-      if (row && row.estado === "Pagado") return;
-      if (!row){
-        row = {
-          id: "r_fix_"+toISO(start)+"_"+c.id+"_"+Math.random().toString(36).slice(2,7),
-          year:Y, month:M, semana:n, cuidadoraId:c.id,
-          metodo:"Transferencia", estado:"Pendiente", comprobante:""
-        };
-        state.registros.push(row);
-      }
-      const info = periodInfo(c, toISO(start));
-      row.periodStyle = weekend ? "weekend" : "weekday";
-      row.fecha = toISO(start);
-      row.periodo = info.periodo;
-      row.monto = info.monto;
-    });
-  });
-  state.config.migraciones = Object.assign({}, state.config.migraciones, { oct2026:true });
-}
-function runOctFix(){
-  requireAdmin(async ()=>{
-    const ok = confirm("Esto corrige las filas PENDIENTES de octubre 2026 (no toca las pagadas):\n\n"
-      + "• Tarifas: Aracely $200/sem, Ibeth $125/sem, Carmita $100/fin de semana\n"
-      + "• Fechas y períodos: lun 5, 12, 19 y 26 (Aracely e Ibeth); sáb 10, 17, 24 y 31 (Carmita)\n"
-      + "• Agrega la fila de Carmita 31 oct–1 nov\n"
-      + "• Feriado del 9 oct: Aracely $240, Ibeth $150\n\n¿Continuar?");
-    if (!ok) return;
-    applyOct2026Fix();
-    await persistConfig();
-    await persistRegistros();
-    state.view = monthKey(2026,10);
-    render();
-    showToast("Octubre 2026 corregido.");
-  });
-}
-
-/* ---------------- Restore Sep/Oct 2026 + bulk receipt search ---------------- */
-// Septiembre ya pagado + octubre, tal como estaban (montos y fechas de los pagos hechos). Solo se ofrece
-// cuando septiembre aparece sin ningún pago marcado como Pagado (señal de que los datos se reiniciaron).
-function looksReseeded(){
-  const sept = rowsForMonth(2026,9);
-  return sept.length === 0 || !sept.some(r=>r.estado === "Pagado");
-}
-function restoreSepOct2026(){
-  requireAdmin(async ()=>{
-    const ok = confirm("Septiembre aparece sin pagos marcados. Esto restaura SEPTIEMBRE 2026 (todo Pagado, con los montos reales) "
-      + "y rehace OCTUBRE 2026 (Carmita 3–4 oct pagada; el resto pendiente con las tarifas y fechas correctas).\n\n"
-      + "Los recibos se vuelven a vincular después con \"Buscar recibos faltantes\".\n\n¿Continuar?");
-    if (!ok) return;
-    const WK = [["2026-08-31","31 ago – 4 sep"],["2026-09-07","7–11 septiembre"],["2026-09-14","14–18 septiembre"],["2026-09-21","21–25 septiembre"],["2026-09-28","28 sep – 2 oct"]];
-    const ARACELY = [130,130,130,200,200];
-    const CARMITA = [["2026-09-05","5–6 septiembre",70],["2026-09-12","12–13 septiembre",80],["2026-09-19","19–20 septiembre",100],["2026-09-26","26–27 septiembre",70]];
-    const mk = (cid, sem, fecha, periodo, monto, year, month)=>({
-      id:"r_rest_"+cid+"_"+fecha+"_"+Math.random().toString(36).slice(2,6),
-      year, month, semana:sem, cuidadoraId:cid, fecha, periodo, monto,
-      metodo:"Transferencia", estado:"Pagado", comprobante:""
-    });
-    state.registros = state.registros.filter(r=>!(r.year===2026 && (r.month===9 || r.month===10)));
-    WK.forEach(([f,per],i)=>{
-      state.registros.push(mk("aracely", i+1, f, per, ARACELY[i], 2026, 9));
-      state.registros.push(mk("ibeth",   i+1, f, per, 125,        2026, 9));
-    });
-    CARMITA.forEach(([f,per,monto],i)=> state.registros.push(mk("carmita", i+1, f, per, monto, 2026, 9)));
-    const c1 = mk("carmita", 1, "2026-10-03", "3–4 octubre", 100, 2026, 10);
-    c1.periodStyle = "weekend";
-    state.registros.push(c1);
-    applyOct2026Fix();   // crea el resto de octubre (pendiente), fija tarifas y marca la corrección como hecha
-    await persistConfig();
-    await persistRegistros();
-    state.view = monthKey(2026,9);
-    render();
-    showToast("Septiembre y octubre restaurados.");
-  });
-}
-function missingReceipts(){ return state.registros.filter(r=>r.estado==="Pagado" && !r.comprobante && r.semana); }
-function buscarRecibosFaltantes(){
-  requireAdmin(async ()=>{
-    const list = missingReceipts();
-    if (!list.length) return showToast("No hay recibos por buscar.");
-    if (!confirm("Buscar en Drive el recibo de "+list.length+" pagos marcados como Pagado que no tienen enlace. Puede tardar un minuto. ¿Continuar?")) return;
-    let found = 0;
-    for (const r of list){
-      await buscarComprobante(r);
-      if (r.comprobante) found++;
-    }
-    render();
-    showToast("Listo: "+found+" de "+list.length+" recibos vinculados.");
   });
 }
 
@@ -1341,7 +1263,9 @@ function openAddRowModal(y,m){
 }
 
 /* ---------------- Boot ---------------- */
-if (initSupabase()) loadAll();
+if (initSupabase()) {
+  initOwnerSession().then((session) => { if (session) loadAll(); });
+}
 </script>
 </body>
 </html>
